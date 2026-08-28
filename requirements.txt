@@ -1,0 +1,26 @@
+# AstraVigil runtime dependencies.
+#
+# Windows / development (synthetic and replay sources, full dashboard):
+#   pip install -r requirements.txt
+#
+# Raspberry Pi 4, Raspberry Pi OS Bookworm - prefer the apt builds, which are
+# compiled against the libraries the Pi already has and avoid a long source
+# build:
+#   sudo apt install -y python3-numpy python3-opencv python3-flask libusb-1.0-0
+#   pip install --break-system-packages pyusb
+#
+# picamera2 ships with Raspberry Pi OS; the optical source falls back to a
+# plain V4L2 webcam if it is absent.
+
+numpy>=1.24
+opencv-python>=4.8 ; platform_machine not in "armv7l aarch64"
+flask>=3.0
+
+# Thermal camera. Linux only in practice - on Windows the camera cannot be
+# claimed without replacing its driver with WinUSB, so use --source synthetic
+# there instead.
+pyusb>=1.2.1 ; sys_platform != "win32"
+
+# 3D mount generation only (hardware/generate_mount.py), not needed to run
+# the dashboard:
+#   pip install trimesh manifold3d shapely

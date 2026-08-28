@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Reference Pi 5 bench rig the thermal driver was ported from - kept locally
+# for comparison, not part of this project.
+ThermalCam/
+
+# 3D mount generation and STLs.
+hardware/
+
+# Captured frames and footage - these get large fast and are rig-specific.
+# The calibration matrix is the exception: it is small, and it is the thing
+# you least want to lose, since regenerating it means re-shooting the
+# reference points with the cameras in exactly the same position.
+data/raw/**/*.npy
+data/raw/**/*.png
+data/raw/**/*.jpg
+data/test_footage/*
+!data/**/.gitkeep
+
+.DS_Store

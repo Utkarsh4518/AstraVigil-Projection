@@ -1,0 +1,81 @@
+# HIKMICRO Mini2 Plus V2 - device identity, frame geometry, and Pi 4 tuning.
+# Everything the driver needs to know about the hardware lives here, so the
+# tuning knobs that differ between boards sit in one file.
+
+# USB identity. The same on every board - the driver finds the camera by
+# VID/PID, never by /dev/video* path, so port order and enumeration order
+# do not matter.
+VENDOR_ID = 0x2BDF
+PRODUCT_ID = 0x0102
+
+# The camera enumerates as a standard UVC composite device: interface 0 is
+# the control interface (class 0x0e/0x01), interface 1 carries the video
+# stream (class 0x0e/0x02).
+#
+# Endpoint 0x81 is BULK, not isochronous, confirmed off the hardware:
+#   /sys/bus/usb/devices/1-1:1.1/ep_81/type -> Bulk    (bmAttributes 0x02)
+#   wMaxPacketSize 512
+#
+# That is the fact this whole driver rests on, and it is unusual - most UVC
+# cameras stream over isochronous endpoints. It matters twice over:
+# pyusb's plain dev.read() handles bulk properly but has no real support for
+# isochronous transfers, and bulk survives USB/IP, which is what makes it
+# possible to test this driver over WSL without a Pi in front of you.
+STREAM_INTERFACE = 1
+STREAM_ENDPOINT = 0x81
+
+# UVC control requests, used to read the streaming format the camera has
+# already negotiated and hand it straight back to commit it.
+UVC_SET_CUR = 0x01
+UVC_GET_CUR = 0x81
+UVC_REQ_TYPE_SET = 0x21
+UVC_REQ_TYPE_GET = 0xA1
+PROBE_CONTROL = 0x0100
+COMMIT_CONTROL = 0x0200
+PROBE_LENGTH = 34
+
+# Frame geometry. The sensor is 256x192, but every frame carries 344 rows of
+# 16-bit little-endian values: 192 rows of thermal data, then a metadata row,
+# then trailing rows we do not use.
+#
+# The camera confirms this itself. A real metadata row reads:
+#   [1612, 1572, 0, 36, 7, 1, 0, 0, 192, 256, 67, 0, 0, 0, 0, 5]
+#             ^ambient 16.12 C              ^^^  ^^^ height, width
+# so cells 8 and 9 carry the thermal dimensions, matching THERMAL_ROWS and
+# FRAME_W below.
+FRAME_W = 256
+FRAME_H = 344
+THERMAL_ROWS = 192
+METADATA_ROW = 192
+BYTES_PER_PIXEL = 2
+EXPECTED_FRAME_BYTES = FRAME_W * FRAME_H * BYTES_PER_PIXEL  # 176128
+
+# Ambient temperature sits in the first cell of the metadata row, in
+# hundredths of a degree.
+AMBIENT_SCALE = 100.0
+
+# Raw sensor counts to a linear temperature, before the correction curve.
+TEMP_BASELINE = 4850
+TEMP_SCALE = 31.0
+
+# UVC payload header bits (byte 1 of each USB packet).
+HEADER_FID = 0x01    # frame id, toggles between consecutive frames
+HEADER_EOF = 0x02    # end of frame
+HEADER_ERR = 0x40    # camera flagged this payload as bad
+
+# --- Pi 4 tuning ---------------------------------------------------------
+# The Pi 4's Cortex-A72 is meaningfully slower than the Pi 5's A76, and its
+# USB sits behind the VL805 PCIe controller. Both push in the same direction:
+# do fewer, larger reads so there is less Python-level work per frame.
+#
+# A frame is 176 KB, so at 16 KB per read that is 11+ round trips through
+# pyusb per frame, 25 times a second. Doubling the chunk halves that.
+# If your kernel returns short reads or the stream turns unreliable, drop
+# READ_CHUNK_BYTES back to 16384 - that is the value the Pi 5 rig used.
+READ_CHUNK_BYTES = 32768
+READ_TIMEOUT_MS = 200
+
+# Reads time out constantly in normal running, so a handful of failures in a
+# row mean nothing. Only complain once it is clearly stuck.
+ERRORS_BEFORE_WARNING = 25
+ERRORS_BETWEEN_WARNINGS = 150

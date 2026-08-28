@@ -25,14 +25,31 @@ Utkarsh Maurya — MSc Information and Communication Systems, TUHH Hamburg. Back
 - No SDR — ruled out RF-based approaches (fingerprinting, GNSS spoofing detection) early on due to lack of SDR hardware
 
 ## HIKmicro Mini2 Plus V2 specs
-- Thermal resolution: 256 x 192 pixels
-- NETD: < 40 mK
-- Field of view: 25° x 18.8° (manual focus version)
-- Focus range: 7 cm to 10 m (this caps realistic detection range — inspection-grade lens, not surveillance-grade)
+Verified against the HIKMICRO published specification:
+
+- Body: **26.6 x 26.6 x 25 mm**, 24 g
+- Thermal resolution: 256 x 192 pixels, **12 µm pixel pitch**
+- NETD: < 40 mK @ 25°C, F#=1.0
+- Lens: **6.9 mm, f/1.0**, FOV 25° x 18.8°
+- **Focus range: 0.1 m to 50 m**
 - Frame rate: 25 Hz
 - Temperature range: -20°C to +400°C
+- Interface: USB-C
 
-**Implication for pitch**: effective demo range is realistically within ~10m. We frame this honestly as "the close-range classify-and-confirm layer in a layered defense" — a production system would pair this with longer-range radar/RF cueing, which is explicitly out of scope for our build.
+**CORRECTION — the "7 cm to 10 m" figure previously recorded here was wrong.** The manufacturer specifies **0.1 m to 50 m**. This matters because the whole "~10 m close-range confirm layer" pitch framing was built on it.
+
+Independent optics check agrees. Deriving the lens from the published FOV and pixel pitch gives 6.9 mm — exactly the specified focal length — and at f/1.0 the **hyperfocal distance is ~4 m**, so with focus at the far setting everything from ~2 m to infinity is sharp. There was never a 10 m focus wall.
+
+**The real limit is angular resolution, not focus.** IFOV is 1.70 mrad/px:
+
+| Target | detect (~2 px) | classify (~8 px) |
+|---|---|---|
+| DJI Mini class (0.25 m) | ~73 m | ~18 m |
+| Mavic class (0.35 m) | ~103 m | ~26 m |
+
+**Revised pitch framing**: detection to roughly 50-70 m (focus supports 50 m, geometry supports ~73 m), shape classification to roughly 20 m. Still honestly a short-to-medium range layer that a production system would pair with longer-range radar/RF cueing — but 50-70 m is a materially stronger and more accurate story than 10 m.
+
+These are geometric limits only; they do not account for thermal contrast falloff, atmospheric attenuation, or the camera's internal temporal filtering. **Verify empirically**: point it out a window at something 50-100 m away with focus at the far setting and check sharpness.
 
 ## System architecture
 Two-stage thermal-optical sensor fusion:
@@ -144,14 +161,22 @@ Working setup achieved after troubleshooting:
   (`quirks=2` = `UVC_QUIRK_PROBE_MINMAX`, tells the driver to tolerate the non-standard probe negotiation.)
 - After reboot: `ffmpeg -f v4l2 -input_format nv12 -video_size 256x192 -i /dev/video1 -frames:v 1 -update 1 output.jpg` succeeds and produces a valid frame.
 - Captured test image is grayscale (expected — raw NV12 has no color palette; the HIKmicro app applies false-color palettes in software, not in the raw stream). For a colorized display, apply `cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)` — cosmetic only, not needed for the actual detection pipeline, which should work directly on raw grayscale intensity values.
-- OpenCV's `pip`-installed `opencv-python` had trouble opening the device directly (`VIDEOIO(V4L2): backend is generally available but can't be used to capture by name`) even after the quirks fix — not yet fully resolved; ffmpeg capture works reliably. Worth revisiting: try `cv2.VideoCapture(1, cv2.CAP_V4L2)` (index instead of path string), or fall back to invoking ffmpeg via `subprocess` from Python if OpenCV continues to be unreliable.
+- OpenCV's `pip`-installed `opencv-python` had trouble opening the device directly (`VIDEOIO(V4L2): backend is generally available but can't be used to capture by name`) even after the quirks fix — ffmpeg capture worked, OpenCV did not.
+
+**Superseded — resolved via a raw USB driver.** The V4L2 path is no longer used. `src/astravigil/drivers/thermal/` drives the camera's streaming endpoint directly over `pyusb`/`libusb`, detaching `uvcvideo` entirely, which sidesteps the probe-negotiation bug without needing the `quirks=2` workaround at all. Ported from a working Raspberry Pi 5 bench rig (kept in `ThermalCam/` for reference) and hardened for the Pi 4 — see `docs/pi4_thermal_bringup.md`.
+
+The decisive advantage is not just that it works: **the V4L2/NV12 path yields 8-bit grayscale, while the raw endpoint yields the full 16-bit per-pixel sensor counts.** Those counts are what the temperature calibration consumes, so this is what makes actual *temperature* — as opposed to brightness — available as a discriminating feature (motor heat vs. bird body heat). The old path discarded that before we ever saw it.
+
+Frame format: 256 x 344 uint16 LE per frame — rows 0-191 thermal, row 192 metadata (cell 0 = ambient in hundredths °C), rest padding. Calibration: `linear = ambient + (raw - 4850)/31.0`, then a piecewise curve with gain 1.0157 / offset 3.37 that matches the HIKMICRO app's factory calibration.
 
 ## Known constraints / honest limitations (for the pitch)
-- Effective range ~10m or less due to thermal lens focus spec — reframed as "close-range classify-confirm layer," not a full long-range perimeter solution
+- ~~Effective range ~10m due to thermal lens focus spec~~ — **corrected**: the spec is 0.1–50 m, and the real limit is angular resolution (~73 m detect, ~18 m classify for a Mini-class drone). See the specs section above
+- Bird-vs-drone discrimination at ~18 m classification range is the genuinely hard problem — a pigeon and a DJI Mini are within a factor of ~1.2 in size
+- The camera applies internal temporal filtering (74.7% of pixels bit-identical frame to frame), which may smear fast-crossing targets — untested
 - No SDR — ruled out RF-based detection/fingerprinting entirely
 - No defeat mechanism — challenge 04 doesn't require one (unlike challenge 01), so this is fully in scope
 - Alert dashboard not yet built
-- OpenCV direct device access not fully solved — currently relying on ffmpeg subprocess calls as the reliable path
+- ~~OpenCV direct device access not fully solved~~ — resolved: raw USB driver in `src/astravigil/drivers/thermal/`, which also unlocked 16-bit temperature data the V4L2 path was discarding
 
 ## Reference / prior art (for the "why this is credible" slide)
 - Commercial systems (HGH Infrared SPYNEL, FLIR/Teledyne, Pelco) use the same core approach (thermal + EO fusion) at much higher cost (~$50K-150K for lower-cost imaging-only systems, <1000m range)

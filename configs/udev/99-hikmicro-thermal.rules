@@ -1,0 +1,12 @@
+# HIKMICRO Mini2 Plus V2 - let the pi user drive the camera without sudo.
+#
+# Install:
+#   sudo cp configs/udev/99-hikmicro-thermal.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   # then unplug and replug the camera
+#
+# Without this, open_camera() fails with "Access denied (insufficient
+# permissions)" for anyone but root. Running the whole pipeline as root just
+# to reach a USB device is not a trade worth making.
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2bdf", ATTRS{idProduct}=="0102", MODE="0660", GROUP="plugdev", TAG+="uaccess"
