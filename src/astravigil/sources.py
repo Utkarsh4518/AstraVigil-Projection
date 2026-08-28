@@ -119,7 +119,7 @@ class HardwareSource(Source):
 
     name = "hardware"
 
-    def __init__(self, optical_index=0, use_picamera=True):
+    def __init__(self, optical_index=0, use_picamera=True, swap_rb=False):
         if platform.system() == "Windows":
             raise RuntimeError(
                 "the thermal camera cannot be opened on Windows without "
@@ -134,12 +134,17 @@ class HardwareSource(Source):
                 "thermal camera did not produce a frame - check "
                 "docs/pi4_thermal_bringup.md")
 
+        self.swap_rb = swap_rb
         self.picam = None
         self.cap = None
         if use_picamera:
             try:
                 from picamera2 import Picamera2
                 self.picam = Picamera2()
+                # picamera2's format names follow libcamera's convention, which
+                # is the REVERSE of what they look like: "RGB888" delivers a
+                # numpy array in B, G, R byte order - already what OpenCV
+                # expects. Converting it again turns skin blue.
                 self.picam.configure(self.picam.create_preview_configuration(
                     main={"size": (640, 480), "format": "RGB888"}))
                 self.picam.start()
@@ -161,12 +166,18 @@ class HardwareSource(Source):
         self._last_raw = raw
 
         if self.picam is not None:
-            optical = cv2.cvtColor(self.picam.capture_array(),
-                                   cv2.COLOR_RGB2BGR)
+            # Already B, G, R - see the format note in __init__. No conversion.
+            optical = self.picam.capture_array()
         else:
             ok, optical = self.cap.read()
             if not ok:
                 optical = np.full((480, 640, 3), 60, np.uint8)
+
+        # Escape hatch: sensor and libcamera version combinations vary, so if
+        # colours still come out inverted, --swap-rb flips them rather than
+        # requiring a code edit at the rig.
+        if self.swap_rb and optical is not None and optical.ndim == 3:
+            optical = optical[:, :, ::-1].copy()
         return raw, optical
 
     @property

@@ -112,6 +112,9 @@ def main():
                     choices=["synthetic", "replay", "hardware"])
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--optical", default=None)
+    ap.add_argument("--swap-rb", action="store_true",
+                    help="flip red/blue on the optical feed if colours look "
+                         "inverted")
     args = ap.parse_args()
 
     kw = {}
@@ -119,6 +122,7 @@ def main():
         kw["optical"] = args.optical
     elif args.source == "hardware":
         kw["optical_index"] = int(args.optical or 0)
+        kw["swap_rb"] = args.swap_rb
     src = sources.create(args.source, **kw)
 
     picker = Picker()

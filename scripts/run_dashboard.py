@@ -35,7 +35,8 @@ def build_source(args):
     if args.source == "replay":
         return sources.create("replay", thermal_dir=args.thermal_dir,
                               optical=args.optical)
-    return sources.create("hardware", optical_index=int(args.optical or 0))
+    return sources.create("hardware", optical_index=int(args.optical or 0),
+                          swap_rb=args.swap_rb)
 
 
 def resolve_homography(args, source):
@@ -77,6 +78,9 @@ def main():
     p.add_argument("--thermal-dir", default="data/raw/thermal")
     p.add_argument("--optical", default=None,
                    help="webcam index or video path for replay/hardware")
+    p.add_argument("--swap-rb", action="store_true",
+                   help="flip red/blue on the optical feed, if colours look "
+                        "inverted (skin appearing blue)")
     args = p.parse_args()
 
     source = build_source(args)
