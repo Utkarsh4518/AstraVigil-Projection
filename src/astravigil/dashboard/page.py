@@ -30,7 +30,53 @@ PAGE = r"""<!doctype html>
   main { padding:16px 20px 32px; }
 
   /* --- alerts ------------------------------------------------------- */
-  .alerts { display:flex; flex-direction:column; gap:8px; margin-bottom:8px; }
+  /* min-height reserves a row of space. Without it, an alert opening or
+     closing changes the height of this block and everything below it
+     jumps - which is exactly the movement that made this panel hard to
+     read while it sat above the camera panes. */
+  /* Three fixed-height columns. The height is FIXED, not min- or max-, and
+     that is the whole point: an alert arriving or clearing must not change
+     the height of this block, or the four camera panes below it get shunted
+     down the page every time something happens. Overflow scrolls inside the
+     column instead. */
+  .board { display:grid; grid-template-columns:repeat(3,1fr); gap:12px;
+           margin-bottom:14px; }
+  .col { background:var(--panel); border:1px solid var(--line);
+         border-radius:8px; display:flex; flex-direction:column;
+         height:186px; overflow:hidden; }
+  .col-alert   { border-color:#5a2230; }
+  .col-watch   { border-color:#5a4a1e; }
+  .col-nominal { border-color:var(--line); }
+  .col h3 { margin:0; padding:7px 10px; font-size:11px; font-weight:600;
+            text-transform:uppercase; letter-spacing:.07em; color:var(--dim);
+            border-bottom:1px solid var(--line); display:flex; gap:8px;
+            align-items:center; flex:none; }
+  .col h3 span:last-child { margin-left:auto; font-variant-numeric:tabular-nums;
+            color:var(--fg); }
+  .stack { flex:1; min-height:0; overflow-y:auto; padding:8px;
+           display:flex; flex-direction:column; gap:7px; }
+  .stack:empty::after { content:"none"; color:#4d5661; font-size:12px;
+           padding:2px; }
+  /* Compact form: two lines, fixed height, three to a column. The full
+     reason text is on the title attribute rather than wrapped, because a card
+     that grows with its reasons would put the column back to changing height
+     - which is the thing this board exists to avoid. */
+  .stack .alert { display:block; padding:5px 8px; font-size:11px;
+                  border-radius:6px; }
+  .stack .ln1 { display:flex; align-items:center; gap:6px; white-space:nowrap;
+                overflow:hidden; }
+  .stack .ln1 b { color:var(--fg); font-weight:600; }
+  .stack .ln1 .thr { font-variant-numeric:tabular-nums; color:var(--fg); }
+  .stack .ln1 .age { color:var(--dim); font-size:10px; }
+  .stack .ln1 .badge { font-size:9px; padding:1px 5px; }
+  .stack .acts { margin-left:auto; display:flex; gap:4px; flex:none; }
+  .stack .acts button { font-size:9.5px; padding:1px 5px; border-radius:4px; }
+  .stack .ln2 { color:var(--dim); font-size:10.5px; margin-top:2px;
+                overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Scrollbars only inside the columns, and unobtrusive. */
+  .stack::-webkit-scrollbar { width:8px; }
+  .stack::-webkit-scrollbar-thumb { background:#2c343e; border-radius:4px; }
+  @media (max-width:900px) { .board { grid-template-columns:1fr; } }
   .alert { display:grid; gap:2px 14px; padding:10px 14px; border-radius:8px;
            background:var(--panel); border:1px solid var(--line);
            border-left:4px solid var(--nominal);
@@ -79,6 +125,7 @@ PAGE = r"""<!doctype html>
   figure img { width:100%; display:block; background:#000; }
   figcaption { padding:8px 12px; font-size:12px; color:var(--dim);
                border-top:1px solid var(--line); }
+
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
        color:var(--dim); margin:26px 0 8px; display:flex; gap:10px;
        align-items:center; }
@@ -161,7 +208,20 @@ PAGE = r"""<!doctype html>
 
 <main>
   <h2>Situational picture</h2>
-  <div class="alerts" id="alerts"></div>
+  <div class="board">
+    <section class="col col-alert">
+      <h3><span class="badge b-alert">alert</span><span id="n-alert">0</span></h3>
+      <div class="stack" id="s-alert"></div>
+    </section>
+    <section class="col col-watch">
+      <h3><span class="badge b-watch">watch</span><span id="n-watch">0</span></h3>
+      <div class="stack" id="s-watch"></div>
+    </section>
+    <section class="col col-nominal">
+      <h3><span class="badge b-nominal">nominal</span><span id="n-nominal">0</span></h3>
+      <div class="stack" id="s-nominal"></div>
+    </section>
+  </div>
 
   <div class="views">
     <figure>
@@ -284,23 +344,35 @@ const accept = key => post("/api/accept", {key});
 const ack = id => post("/api/ack", {id});
 const saveSite = () => post("/api/save_site");
 
+function esc(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+                  .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function alertCard(a) {
   const dur = a.duration_s >= 60
-    ? Math.floor(a.duration_s / 60) + "m " + Math.round(a.duration_s % 60) + "s"
+    ? Math.floor(a.duration_s / 60) + "m" + Math.round(a.duration_s % 60) + "s"
     : Math.round(a.duration_s) + "s";
-  const why = a.reasons.map(r => `<span>${r}</span>`).join("");
-  return `<div class="alert alert-${a.level} kind-${a.kind}">
-    <span class="badge b-${a.level}">${a.level}</span>
-    <span class="who">${a.label}${a.track_id ? " #" + a.track_id : ""}
-      <span class="sensors">${a.sensors || "thermal"}</span>
-      <span class="when">— since ${a.opened_hms}, ${dur}, threat ${fmt(a.threat)}
-      (peak ${fmt(a.peak_threat)})${a.acked ? " · acknowledged" : ""}</span></span>
-    <span class="acts">
-      <button onclick="ack(${a.id})">ack</button>
-      <button onclick="accept('${a.key}')" title="Teach the site model that this is normal here">normal here</button>
-    </span>
-    <span class="why">${why}</span>
-    <span class="why">${identLine(a)}</span>
+  const why = a.reasons.concat(identText(a)).filter(Boolean).join(" · ");
+  const who = a.label + (a.track_id ? " #" + a.track_id : "");
+  // Everything an operator needs at a glance is on line one; the evidence is
+  // on line two, truncated, with the whole of it on hover.
+  return `<div class="alert alert-${a.level} kind-${a.kind}"
+       title="${esc(who + " — since " + a.opened_hms + ", " + dur +
+                    ", threat " + fmt(a.threat) + " (peak " +
+                    fmt(a.peak_threat) + ")
+" + why)}">
+    <div class="ln1">
+      <span class="badge b-${a.level}">${a.level}</span>
+      <b>${who}</b>
+      <span class="thr">${fmt(a.threat)}</span>
+      <span class="age">${dur}${a.acked ? " · ack" : ""}</span>
+      <span class="acts">
+        <button onclick="ack(${a.id})" title="Acknowledge">ack</button>
+        <button onclick="accept('${a.key}')" title="Teach the site model that this is normal here">normal</button>
+      </span>
+    </div>
+    <div class="ln2">${why}</div>
   </div>`;
 }
 
@@ -385,6 +457,17 @@ async function toggleLearn() {
   poll();
 }
 
+// Plain-text form of the remote identification, for the compact card's
+// single evidence line and its hover text.
+function identText(a) {
+  const id = a.identification;
+  if (!id) return "";
+  if (!id.ok) return "ID unavailable: " + id.error;
+  const pay = (id.payload === "likely" || id.payload === "possible")
+    ? ", payload " + id.payload : "";
+  return "ID: " + id.summary + pay;
+}
+
 function identLine(a) {
   const id = a.identification;
   if (!id) return "";
@@ -437,12 +520,24 @@ async function poll() {
       lb.textContent = "learn this site";
     }
 
-    const box = document.getElementById("alerts");
-    box.innerHTML = alerts.length
-      ? alerts.map(alertCard).join("")
-      : `<div class="quiet">No alerts. ${site.learning
-          ? "Site model still learning — it will not flag anything it has no baseline for."
-          : "Site baseline established; everything in view matches it."}</div>`;
+    // Split by level into three columns, newest first, three shown per column.
+    // The count in each header is the TOTAL, so a column capped at three never
+    // hides how many there really are - a board that silently shows 3 of 40
+    // would be worse than one that scrolls.
+    for (const level of ["alert", "watch", "nominal"]) {
+      const of_level = alerts
+        .filter(a => a.level === level)
+        .sort((x, y) => (y.opened_at || 0) - (x.opened_at || 0));
+      document.getElementById("n-" + level).textContent = of_level.length;
+      const stack = document.getElementById("s-" + level);
+      const html = of_level.slice(0, 3).map(alertCard).join("");
+      // Only touch the DOM when it actually changed, or the browser throws
+      // away scroll position and any half-made click four times a second.
+      if (stack.dataset.sig !== html) {
+        stack.dataset.sig = html;
+        stack.innerHTML = html;
+      }
+    }
 
     const body = document.getElementById("rows");
     if (!detections.length) {
