@@ -28,9 +28,30 @@ why there are three independent ways out rather than one.
 3.  Ctrl+Alt+F2                        text console, then run (2)
 ```
 
-Escaping releases **the display only**. The sensor keeps running and keeps
-detecting — a perimeter system should never go blind because somebody wanted
-the desktop. `stop-kiosk.sh --all` stops everything, and says so plainly.
+Escaping performs a **full stop**: browser, pipeline, port and camera all
+released, so the next double-click starts a fresh run with nothing left over.
+`stop-kiosk.sh --display` closes the console but keeps detecting, if that is
+what you want.
+
+This was the other way round originally — escape released only the display,
+on the reasoning that a perimeter system should not go blind because somebody
+wanted the desktop back. That is the right default for a fixed installation
+and the wrong one for a rig you are carrying to a demo: it leaves a half-state
+that is hard to reason about, and the next launch refuses with "already
+running" while appearing to have nothing running at all.
+
+**Shutdown is by SIGTERM, never SIGKILL, and that is load-bearing.** The
+thermal driver detaches `uvcvideo` to claim the USB endpoint and hands it back
+in its cleanup path. Python does not run `finally` blocks on SIGTERM by
+default — the default disposition kills the process outright — so
+`run_dashboard.py` installs a handler that turns SIGTERM into the same
+`KeyboardInterrupt` the Ctrl+C path already handles. Without it, even a polite
+`kill` leaves the camera claimed by a dead process and the next run fails with
+"Device or resource busy" on hardware that is perfectly fine.
+
+Anything that does have to be forced triggers `scripts/release_camera.py`,
+which resets the USB device so the claim is dropped. Killing hardest is the
+thing that breaks "ready to use next time".
 
 ## The escape sequence
 

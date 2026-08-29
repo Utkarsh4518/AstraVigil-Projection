@@ -26,6 +26,7 @@ Then open http://localhost:8000 (or the Pi's address from another machine).
 """
 import argparse
 import os
+import signal
 import sys
 import threading
 
@@ -96,7 +97,34 @@ def resolve_site(args):
     return SiteBaseline(fps=args.fps)
 
 
+def _install_signal_handlers():
+    """Make SIGTERM shut down the way Ctrl+C does.
+
+    Python runs `finally` blocks on SIGINT, because the default handler raises
+    KeyboardInterrupt - but NOT on SIGTERM, whose default disposition kills
+    the process outright. That difference matters here more than it looks: the
+    cleanup this skips is the one that hands the thermal camera back, so a
+    process stopped with a polite `kill` leaves uvcvideo detached and the
+    kernel believing a dead process owns the device. The next run then fails
+    with "Device or resource busy" on hardware that is perfectly fine.
+
+    Turning SIGTERM into the same exception the interrupt path already handles
+    is what makes an orderly shutdown actually orderly.
+    """
+    def graceful(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, graceful)
+        except (ValueError, OSError):
+            # Not the main thread, or the platform will not have it. The
+            # finally block still covers the ordinary exit paths.
+            pass
+
+
 def main():
+    _install_signal_handlers()
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--source", default="synthetic",

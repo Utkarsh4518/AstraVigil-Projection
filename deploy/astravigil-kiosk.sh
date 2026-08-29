@@ -24,6 +24,8 @@ URL="http://localhost:${PORT}/?kiosk=1"
 RESTART_EXIT_CODE=42
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/astravigil"
 LOG="${HOME}/.astravigil-kiosk.log"
+# shellcheck source=_teardown.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/_teardown.sh"
 LOCK="${RUN_DIR}/kiosk.lock"
 BROWSER_PID_FILE="${RUN_DIR}/browser.pid"
 DASH_PID_FILE="${RUN_DIR}/dashboard.pid"
@@ -219,6 +221,9 @@ echo "$BROWSER_PID" >"$BROWSER_PID_FILE"
 log "browser pid $BROWSER_PID"
 
 cleanup() {
+    # Teardown has usually already run by here; this only catches the paths
+    # that did not go through it (a crash, or the browser being closed some
+    # other way). Never -9 the pipeline here: it is holding the camera.
     kill "$BROWSER_PID" 2>/dev/null
     rm -f "$BROWSER_PID_FILE"
 }
@@ -231,15 +236,17 @@ trap cleanup EXIT INT TERM
 while kill -0 "$BROWSER_PID" 2>/dev/null; do
     if curl -fsS --max-time 2 "http://localhost:${PORT}/api/kiosk/status" 2>/dev/null \
         | grep -q '"exit_requested"[[:space:]]*:[[:space:]]*true'; then
-        log "escape sequence accepted - closing the display"
+        log "escape sequence accepted - stopping everything"
         curl -fsS -X POST --max-time 2 "http://localhost:${PORT}/api/kiosk/ack" >/dev/null 2>&1
-        kill "$BROWSER_PID" 2>/dev/null
-        sleep 1
-        notify "Console released.
+        # Full stop, not just the display. Leaving the sensor running is the
+        # safer default for a fixed installation, but it left this rig in a
+        # half-state that was hard to reason about and hard to restart. A
+        # demo rig wants the icon to be the only control there is.
+        astravigil_teardown keep-launcher 2>&1 | while IFS= read -r l; do log "$l"; done
+        notify "AstraVigil stopped.
 
-The sensor is STILL RUNNING and still detecting.
-  Reopen it:  double-click the AstraVigil icon
-  Stop it:    $REPO/deploy/stop-kiosk.sh"
+Everything has been shut down and the camera released.
+Double-click the AstraVigil icon to start a fresh run."
         break
     fi
     sleep 1

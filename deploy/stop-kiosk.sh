@@ -1,64 +1,35 @@
 #!/usr/bin/env bash
 #
-# The way out that does not depend on the browser, the page, or the keyboard.
+# Stop AstraVigil completely: processes, port, camera, lock.
 #
 # Run it from a terminal, over SSH, or from a text console reached with
-# Ctrl+Alt+F2. Every escape hatch that lives inside the kiosk assumes the
-# browser is alive and the page is loaded; this one assumes nothing.
+# Ctrl+Alt+F2. Every escape hatch inside the kiosk assumes the browser is
+# alive and the page is loaded; this one assumes nothing.
 #
-#   ./deploy/stop-kiosk.sh            close the display, keep detecting
-#   ./deploy/stop-kiosk.sh --all      stop everything, sensor included
+#   ./deploy/stop-kiosk.sh              stop everything
+#   ./deploy/stop-kiosk.sh --display    close the console, keep detecting
+#
+# Default is a full stop. The console escape does the same thing, so after
+# either one the icon starts a fresh run with nothing left over.
 
 set -uo pipefail
 
+REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/astravigil"
 PORT="${ASTRAVIGIL_PORT:-8000}"
-ALL=0
-[ "${1:-}" = "--all" ] && ALL=1
+PY="${ASTRAVIGIL_PY:-python3}"
 
-say() { printf '%s\n' "$*"; }
+# shellcheck source=_teardown.sh
+. "$REPO/deploy/_teardown.sh"
 
-# --- the display
-killed=0
-if [ -f "$RUN_DIR/browser.pid" ]; then
-    pid="$(cat "$RUN_DIR/browser.pid" 2>/dev/null)"
-    if [ -n "$pid" ] && kill "$pid" 2>/dev/null; then
-        say "closed the kiosk browser (pid $pid)"
-        killed=1
+if [ "${1:-}" = "--display" ]; then
+    if [ -f "$RUN_DIR/browser.pid" ]; then
+        kill -TERM "$(cat "$RUN_DIR/browser.pid" 2>/dev/null)" 2>/dev/null
+        rm -f "$RUN_DIR/browser.pid"
     fi
-    rm -f "$RUN_DIR/browser.pid"
-fi
-if [ "$killed" -eq 0 ]; then
-    # No pid file, or a stale one. Fall back to the profile directory, which
-    # is unique to this kiosk - so this cannot hit somebody's own browsing.
-    if pkill -f "user-data-dir=${RUN_DIR}/chrome-profile" 2>/dev/null; then
-        say "closed the kiosk browser by profile match"
-    else
-        say "no kiosk browser was running"
-    fi
+    pkill -f "user-data-dir=${RUN_DIR}/chrome-profile" 2>/dev/null
+    echo "console closed - the sensor is still running on port $PORT"
+    exit 0
 fi
 
-# --- the sensor
-if [ "$ALL" -eq 1 ]; then
-    if [ -f "$RUN_DIR/dashboard.pid" ]; then
-        pid="$(cat "$RUN_DIR/dashboard.pid" 2>/dev/null)"
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null && say "stopped the supervisor (pid $pid)"
-        rm -f "$RUN_DIR/dashboard.pid"
-    fi
-    pkill -f "scripts/run_dashboard.py" 2>/dev/null && say "stopped the pipeline"
-    # The launcher itself holds the single-instance lock. Leaving it alive is
-    # what makes the next double-click answer "already running" when nothing
-    # is actually running any more.
-    pkill -f "astravigil-kiosk.sh" 2>/dev/null && say "stopped the launcher"
-    rm -f "$RUN_DIR/kiosk.lock"
-    say ""
-    say "Everything stopped. The site is no longer being watched."
-    say "Double-click the AstraVigil icon to start again."
-else
-    if curl -fsS --max-time 2 "http://localhost:${PORT}/api/state" >/dev/null 2>&1; then
-        say ""
-        say "The sensor is STILL RUNNING and still detecting."
-        say "  console : http://localhost:${PORT}"
-        say "  stop it : $0 --all"
-    fi
-fi
+astravigil_teardown
