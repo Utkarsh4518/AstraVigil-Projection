@@ -1,0 +1,12 @@
+# Windows does not track the executable bit, so scripts committed from there
+# arrive on Linux as 100644 and refuse to run - `sudo ./script.sh` reports the
+# misleading "command not found". The modes are fixed in the index; this keeps
+# line endings from becoming the next cross-platform surprise.
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.png binary
+*.jpg binary
+*.npy binary
+*.npz binary
+*.stl binary
