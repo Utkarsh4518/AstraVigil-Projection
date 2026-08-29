@@ -19,6 +19,15 @@ data/raw/**/*.npy
 data/raw/**/*.png
 data/raw/**/*.jpg
 data/test_footage/*
+
+# Learned site baselines and the incident log. Both are rig-specific runtime
+# state, not source: a baseline is only valid for the exact scene and camera
+# pose it was learned at, and re-learning takes ninety seconds. Unlike the
+# calibration matrix above, there is nothing here you cannot regenerate by
+# pointing the cameras at the site again.
+data/baseline/*.npz
+data/alerts/*.jsonl
+
 !data/**/.gitkeep
 
 .DS_Store

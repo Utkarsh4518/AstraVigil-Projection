@@ -5,6 +5,12 @@ Scores frame matching against simulated ground truth, which is the one check
 that catches a homography that is subtly wrong - the failure mode that looks
 fine on screen and quietly puts every optical crop a few pixels off target.
 
+Then it exercises the site model on the challenge brief's own scenario: a
+drone that lands and sits still, and one that was already on the ground before
+the system booted. The second is the interesting one, because motion detection
+is structurally blind to it - it is in the very first background frame - so it
+either proves the persistent baseline works or proves it does not.
+
     python scripts/selftest.py
 """
 import os
@@ -16,8 +22,10 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from astravigil import sources                      # noqa: E402
+from astravigil.alerting import AlertManager        # noqa: E402
 from astravigil.calibration import homography       # noqa: E402
 from astravigil.pipeline import Pipeline            # noqa: E402
+from astravigil.site_intelligence import SiteBaseline   # noqa: E402
 
 FAILURES = []
 
@@ -110,6 +118,139 @@ def main():
         check(f"{name} view renders and encodes",
               img is not None and jpg is not None and len(jpg) > 500,
               f"{img.shape[1]}x{img.shape[0]}, {len(jpg) // 1024} KB")
+
+    section("6. SITE INTELLIGENCE")
+    # Learn a clean scene first. Everything after this depends on the model
+    # having a real baseline, and on that baseline being quiet - a site model
+    # that flags an empty apron is worse than none.
+    clean = sources.create("synthetic", scenario="clean")
+    learner = Pipeline(clean, H=clean.truth_homography, clock="frames",
+                       alerts=AlertManager(log_path=None))
+    for _ in range(900):
+        learner.step()
+    site_stats = learner.site.stats()
+    check("site baseline matured", site_stats["scene_maturity"] >= 1.0,
+          f"scene {site_stats['scene_maturity']*100:.0f}%, traffic "
+          f"{site_stats['activity_maturity']*100:.0f}%")
+    check("clean scene raises no alerts", not learner.result.alerts,
+          f"{len(learner.result.alerts)} open")
+    check("clean scene has no settled anomalies",
+          not learner.result.static_anomalies,
+          f"{site_stats['anomalous_cells']} cells off baseline")
+    worst = max((a.threat for a in learner.result.assessments), default=0.0)
+    check("routine traffic stays below the alert line", worst < 0.75,
+          f"highest threat {worst:.2f}")
+
+    # Save and reload: a site model that does not survive a restart cannot do
+    # the job it exists for, which is remembering yesterday.
+    tmp = os.path.join("data", "baseline", "_selftest.npz")
+    learner.save_site(tmp)
+    reloaded = SiteBaseline.load(tmp)
+    same = float(np.abs(reloaded.ref_mean - learner.site.ref_mean).max())
+    check("site model survives save and reload", same < 1e-6
+          and reloaded.frames == learner.site.frames,
+          f"max cell difference {same:.2e}, {reloaded.frames} frames")
+
+    section("7. THE TARMAC CASE - an object that never moved")
+    # The drone is on the ground before frame one, so the motion detector's
+    # background absorbs it immediately and never reports it. Only the
+    # baseline learned above can see it.
+    resident = sources.create("synthetic", scenario="resident")
+    watcher = Pipeline(resident, H=resident.truth_homography, site=reloaded,
+                       clock="frames", alerts=AlertManager(log_path=None))
+    settled_alerts, bird_alerts = set(), set()
+    for _ in range(500):
+        r = watcher.step()
+        for al in r.alerts:
+            (settled_alerts if al.kind == "static" else bird_alerts).add(al.id)
+
+    check("settled object detected with no motion cue",
+          len(settled_alerts) >= 1,
+          f"{len(settled_alerts)} settled-object alert(s)")
+    check("reported as ONE alert, not one per frame",
+          len(settled_alerts) == 1,
+          f"{len(settled_alerts)} distinct alerts over 500 frames")
+    check("routine traffic did not alert alongside it",
+          not bird_alerts, f"{len(bird_alerts)} track alerts")
+    if watcher.result.alerts:
+        al = watcher.result.alerts[0]
+        print(f"         \"{al.label}\" threat {al.threat:.2f}, "
+              f"still for {al.dwell_s:.0f} s")
+        print(f"         because: {'; '.join(al.reasons)}")
+
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
+    section("8. CROSS-CUEING - each camera asking the other")
+    # Thermal -> optical. The shape check must either produce a verdict or say
+    # plainly that there were not enough pixels to produce one. Inventing a
+    # shape from twelve pixels is the failure mode worth guarding against.
+    cross = sources.create("synthetic", scenario="intrusion")
+    cp = Pipeline(cross, H=cross.truth_homography, clock="frames",
+                  alerts=AlertManager(log_path=None))
+    for _ in range(500):
+        cr = cp.step()
+
+    c = cr.cross
+    check("optical camera detects independently",
+          c["optical_candidates"] > 0,
+          f"{c['optical_candidates']} optical candidates")
+    check("thermal asks optical for a shape check",
+          c["shape_checks"] > 0, f"{c['shape_checks']} checks this frame")
+
+    ev = list(cr.optical_evidence.values())
+    honest = all(e.confidence == 0.0 or e.pixels >= 60 for e in ev)
+    check("no shape verdict from too few pixels", honest,
+          "; ".join(f"{e.pixels:.0f}px conf {e.confidence:.2f}" for e in ev))
+
+    # The rule that keeps this from rebuilding the wall of alarms: one object
+    # seen by both sensors must be one entry, not two.
+    keys = [a.key for a in cr.assessments]
+    check("one object seen by both sensors is ONE entry",
+          len(keys) == len(set(keys)) and c["paired_with_thermal"] >= 1,
+          f"{c['paired_with_thermal']} paired, {len(keys)} assessments, "
+          f"{c['optical_only']} optical-only")
+
+    section("9. THERMAL CROSSOVER - the reverse cue carrying alone")
+    # The drone sits at exactly ambient: no contrast, no signature, nothing
+    # for the thermal detector or the site baseline to find. Either the
+    # optical camera raises it on its own or the system never sees it.
+    xo = sources.create("synthetic", scenario="crossover")
+    xp = Pipeline(xo, H=xo.truth_homography, clock="frames",
+                  alerts=AlertManager(log_path=None))
+    thermal_ever = 0
+    contact = None
+    for i in range(2200):
+        xr = xp.step()
+        # The bird is warm and legitimately thermal; only count detections
+        # near where the invisible drone actually is.
+        for a in xr.assessments:
+            if a.kind == "optical":
+                contact = a
+        thermal_ever = max(thermal_ever, len(xr.static_anomalies))
+
+    check("thermal raised nothing - it is genuinely blind here",
+          thermal_ever == 0, f"{thermal_ever} thermal settled anomalies")
+    check("optical found it anyway", contact is not None,
+          contact.label if contact else "nothing")
+    if contact is not None:
+        check("optical asked thermal and got an honest 'no heat'",
+              contact.thermal_check is not None
+              and not contact.thermal_check.warm,
+              contact.thermal_check.reason if contact.thermal_check else "-")
+        check("escalates with dwell rather than sitting at zero",
+              contact.threat > 0.45,
+              f"threat {contact.threat:.2f} after {contact.dwell_s:.0f} s")
+        # Deliberately NOT an alert. With no heat and one sensor, the system
+        # cannot tell a cold airframe from a parked object, and claiming it
+        # can is how a perimeter system loses its operator's trust.
+        check("stays a WATCH, not an ALERT - one sensor, no corroboration",
+              contact.level == "watch",
+              f"level {contact.level} at threat {contact.threat:.2f}")
+        print(f"         \"{contact.label}\" - "
+              f"{'; '.join(contact.reasons)}")
 
     section("RESULT")
     if FAILURES:

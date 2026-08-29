@@ -46,9 +46,10 @@ class Source:
 class SyntheticSource(Source):
     name = "synthetic"
 
-    def __init__(self, seed=0, fps=25.0):
+    def __init__(self, seed=0, fps=25.0, scenario="patrol"):
         from .sim import SyntheticScene
-        self.scene = SyntheticScene(seed=seed)
+        self.scene = SyntheticScene(seed=seed, scenario=scenario)
+        self.name = f"synthetic:{scenario}"
         self.dt = 1.0 / fps
         self.truth_homography = self.scene.H_truth
 

@@ -37,8 +37,22 @@ T_HORIZON = 8.0
 T_GROUND = 16.0
 T_BUILDING = 14.0
 T_AMBIENT = 16.0
-T_DRONE_BODY = 28.0
-T_DRONE_MOTOR = 42.0
+# Measured off the real HIKMICRO Mini2 Plus V2, not assumed. Two captures of
+# an actual quadcopter:
+#
+#   close range   max 45.4 C against a 20.5 C background
+#   mid range     max 35.0 C against a 19.2 C background
+#
+# The important correction: the HOTTEST PART IS THE CENTRE. Battery, ESCs and
+# the video transmitter all sit in the body, and they run hotter than the
+# motors on a small airframe at hover. This file previously had it backwards -
+# motors at 42 C around a 28 C body - which is the intuitive guess and is
+# wrong. It matters because the classifier's strongest surviving feature is
+# peak-above-own-mean, and a model that puts the peak in the wrong place
+# produces a blob with the wrong statistics to tune against.
+T_DRONE_CORE = 44.0     # battery / ESC / VTX stack, centre of the airframe
+T_DRONE_BODY = 33.0     # shell around the core
+T_DRONE_MOTOR = 30.0    # motor cans - warm, but cooler than the core
 T_BIRD = 31.0
 
 # Sensor noise, in raw counts. Measured NETD on the real camera was ~13 mK
@@ -66,6 +80,13 @@ class Target:
         self.vx, self.vy = float(vx), float(vy)
         self.size = float(size)
         self.phase = 0.0
+        # Per-target rather than global constants, because the intruder below
+        # has to cool down after it lands - which is the point of it.
+        self.body_c = T_DRONE_BODY if kind == "drone" else T_BIRD
+        self.motor_c = T_DRONE_MOTOR
+        self.core_c = T_DRONE_CORE
+        self.visible = True
+        self.crossover = False
 
     def step(self, dt):
         self.x += self.vx * dt
@@ -88,6 +109,84 @@ class Target:
             self.y, self.vy = PATROL_Y[1], -abs(self.vy)
 
 
+# Where the intruder puts down: on the ground, below the horizon, inside the
+# thermal field of view. The whole point of the scenario is that this is a
+# place nothing ever goes, so the site model has never seen anything there.
+LANDING_XY = (700.0, 645.0)
+APPROACH_XY = (540.0, 340.0)
+MOTOR_COOL_TAU_S = 25.0
+BODY_COOL_TAU_S = 70.0
+
+
+class Intruder(Target):
+    """A quadcopter that flies in, lands, and then just sits there.
+
+    This is the challenge brief's own scenario, and it is the case a motion
+    detector cannot hold: for a few seconds it is an obvious warm mover, and
+    after that it is a rock. Its motors then cool towards its airframe, so
+    even the hotspot cue - the strongest thing the classifier has - fades out
+    while the object is still sitting on the apron.
+
+    What is left after a minute is a small warm patch that has not moved and
+    was not there yesterday. Only the site baseline can still see it.
+    """
+
+    def __init__(self, enter_at=6.0, travel_s=7.0, landed=False,
+                 crossover=False):
+        # Thermal crossover: the airframe sits at exactly the temperature of
+        # whatever is behind it, so it has no thermal contrast at all. This
+        # happens for real twice a day as the background sweeps through
+        # ambient, and it is also what a drone parked long enough to
+        # cold-soak looks like. The thermal camera is genuinely blind to it -
+        # not degraded, blind - and only the optical camera can see it.
+        super().__init__("drone", APPROACH_XY[0], APPROACH_XY[1],
+                         0.0, 0.0, 22.0)
+        # After super(), which resets it to the Target default.
+        self.crossover = crossover
+        self.enter_at = 0.0 if landed else enter_at
+        self.travel_s = 1e-6 if landed else travel_s
+        self.landed_at = None
+        self.t = 0.0
+        self.visible = landed
+        if landed:
+            self.x, self.y = LANDING_XY
+            # Already been there for hours: fully cold-soaked, which is the
+            # hardest version of the problem.
+            self.body_c = T_GROUND + 4.5
+            self.motor_c = self.core_c = self.body_c
+
+    def step(self, dt):
+        self.t += dt
+        self.phase += dt * 60.0
+        if self.t < self.enter_at:
+            self.visible = False
+            return
+        self.visible = True
+
+        p = min(1.0, (self.t - self.enter_at) / self.travel_s)
+        if p < 1.0:
+            # Ease-out: it arrives fast and settles slowly, which is what a
+            # descent under command looks like and keeps the tracker fed.
+            e = 1.0 - (1.0 - p) ** 2
+            self.x = APPROACH_XY[0] + (LANDING_XY[0] - APPROACH_XY[0]) * e
+            self.y = APPROACH_XY[1] + (LANDING_XY[1] - APPROACH_XY[1]) * e
+            return
+
+        if self.landed_at is None:
+            self.landed_at = self.t
+        self.x, self.y = LANDING_XY
+        dwell = self.t - self.landed_at
+        floor = T_GROUND + 4.5
+        # The core carries most of the stored heat, so it is what fades most
+        # visibly once the airframe is on the ground and unpowered.
+        self.core_c = (floor + (T_DRONE_CORE - floor)
+                       * math.exp(-dwell / MOTOR_COOL_TAU_S))
+        self.motor_c = (floor + (T_DRONE_MOTOR - floor)
+                        * math.exp(-dwell / MOTOR_COOL_TAU_S))
+        self.body_c = (floor + (T_DRONE_BODY - floor)
+                       * math.exp(-dwell / BODY_COOL_TAU_S))
+
+
 class SyntheticScene:
     """One flat world, two virtual cameras, one known homography between them.
 
@@ -96,9 +195,17 @@ class SyntheticScene:
     relationship the printed mount produces.
     """
 
-    def __init__(self, seed=0, baseline_px=26.0):
+    SCENARIOS = ("clean", "patrol", "intrusion", "resident", "crossover")
+
+    def __init__(self, seed=0, baseline_px=26.0, scenario="patrol"):
+        if scenario not in self.SCENARIOS:
+            raise ValueError(f"unknown scenario {scenario!r}, expected one "
+                             f"of {list(self.SCENARIOS)}")
+        self.scenario = scenario
         self.rng = np.random.default_rng(seed)
         self._build_world()
+        # Somewhere for thermally-invisible targets to be drawn and discarded.
+        self._scratch = np.zeros_like(self.world_temp)
 
         # Optical camera: wide view of the world centre.
         opt_src = np.float32([[120, 90], [1280, 70], [1310, 900], [90, 920]])
@@ -120,10 +227,30 @@ class SyntheticScene:
                         @ np.linalg.inv(self.H_world_to_thermal))
         self.H_truth /= self.H_truth[2, 2]
 
-        self.targets = [
-            Target("drone", 560, 380, 58.0, 11.0, 22.0),
-            Target("bird", 890, 500, -44.0, -18.0, 17.0),
-        ]
+        # A bird patrols in every scenario. It is not decoration - it is the
+        # negative example. The site model has to learn that birds crossing
+        # the perimeter are normal here, or the demo is just an alarm that
+        # fires at everything.
+        # "clean" is that and nothing else: the scene as it is supposed to
+        # be, which is what a site baseline has to be learned from. Learning
+        # from a scene that already contains the intruder teaches the system
+        # that the intruder belongs.
+        self.targets = [Target("bird", 890, 500, -44.0, -18.0, 17.0)]
+        if scenario == "patrol":
+            self.targets.insert(0, Target("drone", 560, 380, 58.0, 11.0, 22.0))
+        elif scenario == "intrusion":
+            self.targets.append(Intruder())
+        elif scenario == "resident":
+            # Already on the ground before the first frame, so the motion
+            # detector's background absorbs it instantly and never reports
+            # it. Needs a site model learned earlier to be seen at all.
+            self.targets.append(Intruder(landed=True))
+        elif scenario == "crossover":
+            # Same approach and landing, but at ambient temperature the whole
+            # way. Nothing thermal to detect, nothing thermal to learn a
+            # baseline deviation from. If the optical camera cannot raise
+            # this on its own, the system does not see it at all.
+            self.targets.append(Intruder(crossover=True))
         self.t = 0.0
 
     # ------------------------------------------------------------ world
@@ -161,24 +288,39 @@ class SyntheticScene:
 
     def _draw_targets(self, temp, bgr):
         for tg in self.targets:
+            if not tg.visible:
+                continue
             x, y, s = int(tg.x), int(tg.y), tg.size
+            # A crossover target is written to a throwaway array instead of
+            # the real thermal frame, so it leaves no signature of any kind.
+            # Matching the background by sampling one pixel does not work:
+            # the sky has a vertical gradient across the target's own
+            # footprint, and the residual edge contrast is enough for the
+            # detector to find. Blind has to mean blind.
+            T = self._scratch if tg.crossover else temp
             if tg.kind == "drone":
                 # Body plus four rotor hubs. The hubs are the hottest thing in
                 # the scene, which is what a real quad looks like in LWIR.
                 cv2.rectangle(bgr, (x - int(s * .35), y - int(s * .25)),
                               (x + int(s * .35), y + int(s * .25)),
                               (45, 45, 50), -1)
-                cv2.rectangle(temp, (x - int(s * .35), y - int(s * .25)),
+                # Shell first, then the hot core inside it. Drawn in this
+                # order so the core wins - it is the peak the classifier's
+                # hotspot feature is measuring.
+                cv2.rectangle(T, (x - int(s * .35), y - int(s * .25)),
                               (x + int(s * .35), y + int(s * .25)),
-                              T_DRONE_BODY, -1)
+                              tg.body_c, -1)
+                cv2.rectangle(T, (x - int(s * .17), y - int(s * .13)),
+                              (x + int(s * .17), y + int(s * .13)),
+                              tg.core_c, -1)
                 for dx in (-1, 1):
                     for dy in (-1, 1):
                         cx = x + int(dx * s * 0.62)
                         cy = y + int(dy * s * 0.42)
                         cv2.circle(bgr, (cx, cy), max(2, int(s * .16)),
                                    (35, 35, 40), -1)
-                        cv2.circle(temp, (cx, cy), max(2, int(s * .16)),
-                                   T_DRONE_MOTOR, -1)
+                        cv2.circle(T, (cx, cy), max(2, int(s * .16)),
+                                   tg.motor_c, -1)
                         # Rotor disc: faint, wide, and cooler than the hub.
                         cv2.circle(bgr, (cx, cy), max(3, int(s * .40)),
                                    (70, 70, 75), 1)
@@ -188,7 +330,7 @@ class SyntheticScene:
                 flap = np.sin(tg.phase)
                 cv2.ellipse(bgr, (x, y), (int(s * .34), int(s * .20)), 0, 0,
                             360, (40, 38, 36), -1)
-                cv2.ellipse(temp, (x, y), (int(s * .34), int(s * .20)), 0, 0,
+                cv2.ellipse(T, (x, y), (int(s * .34), int(s * .20)), 0, 0,
                             360, T_BIRD, -1)
                 span = int(s * (0.5 + 0.75 * abs(flap)))
                 lift = int(-flap * s * 0.55)
@@ -198,13 +340,18 @@ class SyntheticScene:
                                     [x + sgn * int(span * .5),
                                      y + int(s * .16)]], np.int32)
                     cv2.fillPoly(bgr, [pts], (40, 38, 36))
-                    cv2.fillPoly(temp, [pts], T_BIRD - 1.5)
+                    cv2.fillPoly(T, [pts], T_BIRD - 1.5)
 
     # ------------------------------------------------------------ render
     def step(self, dt=1.0 / 25.0):
         for tg in self.targets:
             tg.step(dt)
         self.t += dt
+
+    @property
+    def truth_targets(self):
+        """Targets currently rendered into the world, for scoring."""
+        return [tg for tg in self.targets if tg.visible]
 
     def _rendered_world(self):
         temp = self.world_temp.copy()

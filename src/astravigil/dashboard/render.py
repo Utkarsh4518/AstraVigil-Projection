@@ -1,10 +1,22 @@
-"""Turning a pipeline Result into the three views the dashboard shows.
+"""Turning a pipeline Result into the four views the dashboard shows.
 
-The overlay view is the one that matters. It warps the thermal frame into
-optical coordinates so you can see, directly, whether the frame matching is
-right - hot regions should sit on the objects that are actually hot. That is
-the check that catches a drifted homography before it quietly corrupts every
-optical crop downstream.
+Two of them are diagnostics for things that fail silently, which is why they
+exist at all:
+
+  OVERLAY warps the thermal frame into optical coordinates, so you can see
+  directly whether the frame matching is right - hot regions should sit on
+  the objects that are actually hot. That is the check that catches a drifted
+  homography before it quietly corrupts every optical crop downstream.
+
+  SITE draws what the baseline has learned: where traffic normally passes and
+  which cells are currently off-baseline. An adaptive system that cannot show
+  you its own model is a system nobody will trust in a control room, and it is
+  also the only way to tell "it has learned the scene" apart from "it has
+  learned nothing and is silent for that reason".
+
+Boxes are coloured by threat level rather than by class. The class is still
+written in the label, but what an operator needs at a glance is which of the
+things on screen matters.
 """
 import cv2
 import numpy as np
@@ -14,11 +26,26 @@ from ..calibration import homography
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue
 COL_UNKNOWN = (150, 150, 160)
+
+COL_ALERT = (55, 55, 240)      # red
+COL_WATCH = (40, 175, 235)     # amber
+COL_NOMINAL = (120, 200, 130)  # muted green
+COL_SETTLED = (220, 90, 220)   # magenta - the site channel, not the detector
+COL_OPTICAL = (235, 235, 60)   # cyan - found by the optical camera alone
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
 def colour_for(label):
     return {"drone": COL_DRONE, "bird": COL_BIRD}.get(label, COL_UNKNOWN)
+
+
+def colour_for_level(level):
+    return {"alert": COL_ALERT, "watch": COL_WATCH}.get(level, COL_NOMINAL)
+
+
+def assessment_map(result):
+    """track_id -> Assessment, for the views that draw detections."""
+    return {a.track_id: a for a in result.assessments if a.kind == "track"}
 
 
 def colourise(celsius, lo=None, hi=None):
@@ -32,24 +59,42 @@ def colourise(celsius, lo=None, hi=None):
     return cv2.applyColorMap(u8, cv2.COLORMAP_INFERNO)
 
 
+def _tag(img, text, x, y, col, scale=0.4):
+    cv2.putText(img, text, (x, max(12, y)), FONT, scale, (0, 0, 0), 3,
+                cv2.LINE_AA)
+    cv2.putText(img, text, (x, max(12, y)), FONT, scale, col, 1, cv2.LINE_AA)
+
+
 def thermal_view(result, scale=2):
     img = colourise(result.thermal_c)
+    seen = assessment_map(result)
+
     for det in result.detections:
         x, y, w, h = det.box
-        col = colour_for(det.label)
-        cv2.rectangle(img, (x, y), (x + w, y + h), col, 1)
+        a = seen.get(det.track_id)
+        cv2.rectangle(img, (x, y), (x + w, y + h),
+                      colour_for_level(a.level if a else "nominal"), 1)
+    for an in result.static_anomalies:
+        x, y, w, h = an.box
+        cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 1)
+
     img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                      interpolation=cv2.INTER_NEAREST)
+
     for det in result.detections:
-        x, y, w, h = [v * scale for v in det.box]
-        col = colour_for(det.label)
+        x, y = det.box[0] * scale, det.box[1] * scale
+        a = seen.get(det.track_id)
+        col = colour_for_level(a.level if a else "nominal")
         tag = f"#{det.track_id} {det.label}"
-        if det.confidence:
-            tag += f" {det.confidence:.2f}"
-        cv2.putText(img, tag, (x, max(12, y - 4)), FONT, 0.4, (0, 0, 0), 3,
-                    cv2.LINE_AA)
-        cv2.putText(img, tag, (x, max(12, y - 4)), FONT, 0.4, col, 1,
-                    cv2.LINE_AA)
+        if a is not None:
+            tag += f" t{a.threat:.2f}"
+            if a.dwell_s >= 3:
+                tag += f" [{a.dwell_s:.0f}s still]"
+        _tag(img, tag, x, y - 4, col)
+    for an in result.static_anomalies:
+        x, y = an.box[0] * scale, an.box[1] * scale
+        _tag(img, f"SETTLED {an.dwell_s:.0f}s", x, y - 4, COL_SETTLED)
+
     _banner(img, f"THERMAL 256x192  {result.proc_ms:.2f} ms detect")
     return img
 
@@ -59,16 +104,48 @@ def optical_view(result, H):
     if H is None:
         _banner(img, "OPTICAL - not calibrated")
         return img
+
+    seen = assessment_map(result)
+    # Where the optical detector is allowed to look. Outside this box the
+    # thermal camera cannot verify anything, and on a fixed mount there is no
+    # way to slew - so an operator should be able to see the boundary.
+    roi = getattr(result, "optical_roi", None)
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), (90, 90, 100), 1)
+
+    # Optical contacts nothing thermal claimed. These are the reverse cue.
+    for od in result.optical_detections:
+        if od.thermal_match is not None:
+            continue
+        x, y, w, h = od.box
+        cv2.rectangle(img, (x, y), (x + w, y + h), COL_OPTICAL, 2)
+        _tag(img, "OPTICAL ONLY", x, y - 6, COL_OPTICAL, 0.45)
+
     for det in result.detections:
         x, y, w, h = homography.map_box(H, det.box)
-        col = colour_for(det.label)
+        a = seen.get(det.track_id)
+        col = colour_for_level(a.level if a else "nominal")
         cv2.rectangle(img, (x, y), (x + w, y + h), col, 2)
         tag = f"#{det.track_id} {det.label} {det.confidence:.2f}"
-        cv2.putText(img, tag, (x, max(14, y - 6)), FONT, 0.5, (0, 0, 0), 3,
-                    cv2.LINE_AA)
-        cv2.putText(img, tag, (x, max(14, y - 6)), FONT, 0.5, col, 1,
-                    cv2.LINE_AA)
-    _banner(img, "OPTICAL - thermal detections mapped through H")
+        if a is not None:
+            tag += f"  threat {a.threat:.2f}"
+        ev = result.optical_evidence.get(det.track_id)
+        if ev is not None and ev.usable:
+            tag += f"  | optical: {ev.label} {ev.confidence:.2f}"
+        elif ev is not None:
+            tag += "  | optical: no shape"
+        _tag(img, tag, x, y - 6, col, 0.5)
+    for an in result.static_anomalies:
+        x, y, w, h = homography.map_box(H, an.box)
+        cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 2)
+        _tag(img, f"SETTLED OBJECT {an.dwell_s:.0f}s", x, y - 6, COL_SETTLED, 0.5)
+
+    c = result.cross or {}
+    _banner(img, f"OPTICAL - {c.get('paired_with_thermal', 0)} paired with "
+                 f"thermal, {c.get('optical_only', 0)} optical-only, "
+                 f"{c.get('shape_usable', 0)}/{c.get('shape_checks', 0)} "
+                 f"shape checks usable")
     return img
 
 
@@ -96,6 +173,49 @@ def overlay_view(result, H, alpha=0.45):
     cv2.putText(img, "thermal FOV", tuple(corners[0] + np.array([4, 18])),
                 FONT, 0.45, (0, 235, 235), 1, cv2.LINE_AA)
     _banner(img, f"OVERLAY - thermal warped into optical  alpha={alpha:.2f}")
+    return img
+
+
+def site_view(result, site, scale=2):
+    """What the site model has learned, and where it currently disagrees.
+
+    Green is learned traffic: the brighter the cell, the more often something
+    has moved through it. Magenta is a cell that has been off its learned
+    temperature long enough to be an object rather than a fly-past. An empty
+    green map means the model has seen nothing yet and its silence means
+    nothing either - which is exactly why this view is here.
+    """
+    img = colourise(result.thermal_c)
+
+    rate = cv2.resize(site._rate, (img.shape[1], img.shape[0]),
+                      interpolation=cv2.INTER_NEAREST)
+    # Square root so a rarely-used corner is still visible next to a corridor
+    # that carries most of the traffic.
+    norm = np.sqrt(np.clip(rate / max(rate.max(), 1e-6), 0, 1))
+    green = np.zeros_like(img)
+    green[:, :, 1] = (norm * 200).astype(np.uint8)
+    img = cv2.addWeighted(img, 1.0, green, 0.55, 0)
+
+    settled = cv2.resize(
+        (site.persist >= site.persist_frames).astype(np.uint8),
+        (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(settled, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, COL_SETTLED, 1)
+
+    img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
+                     interpolation=cv2.INTER_NEAREST)
+    for an in result.static_anomalies:
+        x, y, w, h = [v * scale for v in an.box]
+        cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 1)
+        _tag(img, f"{an.dwell_s:.0f}s  {an.peak_dev_c:+.1f}C", x, y - 4,
+             COL_SETTLED)
+
+    s = site.stats()
+    state = ("LEARNING" if s["learning"] else "LEARNED")
+    _banner(img, f"SITE {state}  scene {s['scene_maturity']*100:.0f}%  "
+                 f"activity {s['activity_maturity']*100:.0f}%  "
+                 f"off-baseline cells {s['anomalous_cells']}")
     return img
 
 

@@ -12,7 +12,14 @@ essentially noise there. Two things still separate them:
             airframe does not. Measured on the simulated scene, a flapping
             bird scores ~0.5 and a quad ~0.12, which is a wide margin.
 
-  HOT CORES a quad carries motor hotspots far above its own body temperature.
+  HOT CORE  a quad carries a small very hot region far above its own mean.
+            Measured on the real camera, that region is the CENTRE of the
+            airframe - battery, ESCs and video transmitter - not the motors
+            at the arm tips. This was assumed the other way round originally
+            and the assumption was wrong; the feature works either way,
+            because it only asks how far the peak sits above the object's own
+            mean, but the simulation it was tuned against had to be corrected.
+
             Note this is peak-above-OWN-MEAN, not contrast against the sky -
             grading on background contrast discriminates nothing, because a
             31 C bird against -5 C sky is exactly as bright as a drone.
@@ -26,13 +33,20 @@ you have captured negatives, and do not quote the confidences as accuracy.
 """
 
 W_FLAP = 0.45           # wingbeat - the strongest cue that survives at range
-W_HOTSPOT = 0.30        # motor cores above the object's own mean
+W_HOTSPOT = 0.30        # hot core above the object's own mean
 W_SHAPE = 0.15          # only meaningful on a well-resolved target
 W_STRAIGHT = 0.10       # weak evidence; birds fly straight too
 
 FLAP_BIRD = 0.30        # area CoV at or above this reads as flapping
 FLAP_RIGID = 0.15       # below this the silhouette is essentially rigid
-HOTSPOT_DRONE_C = 6.0   # peak this far above own mean implies motors
+# Both thresholds are validated against the two real captures, which is more
+# than the rest of this file can claim:
+#   close range  peak 45.4 C, blob mean ~31 C  ->  hotspot ~14 C
+#   mid range    peak 35.0 C, blob mean ~27 C  ->  hotspot ~8 C
+# So a real quadcopter clears HOTSPOT_DRONE_C with margin at both ranges, and
+# the margin shrinks with distance exactly as expected - apparent peak falls
+# as the target covers fewer pixels and each one averages in more background.
+HOTSPOT_DRONE_C = 6.0   # peak this far above own mean implies a powered core
 HOTSPOT_FLAT_C = 2.0    # a near-uniform blob is a body, not an airframe
 STRAIGHT_DRONE = 0.90
 MIN_HITS = 8            # frames of history before committing to a label
@@ -64,7 +78,7 @@ def classify(detection, track):
         bird += W_FLAP * f
         drone += W_FLAP * (1.0 - f)
 
-    # --- motor hotspots
+    # --- hot core (battery/ESC/VTX stack), not the motors
     hot = detection.hotspot_c
     if hot >= HOTSPOT_DRONE_C:
         drone += W_HOTSPOT

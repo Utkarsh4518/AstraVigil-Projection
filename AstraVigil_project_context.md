@@ -56,9 +56,9 @@ Two-stage thermal-optical sensor fusion:
 
 1. **Rooftop sensor unit** — thermal camera (Mini2 Plus V2) + optical camera (Pi Cam Module 2), rigidly mounted side by side, overlooking the apron
 2. **Frame sync + anomaly detection** — thermal background subtraction / frame differencing flags warm moving blobs against the (cold) sky
-3. **Shape + size classification** — the flagged region is mapped into the optical frame (via homography, see below) and cropped; contour/shape analysis (rotor silhouette vs. bird body/wing shape) plus size estimation discriminates drone vs. bird vs. clutter
+3. **Shape + size classification** — the flagged region is mapped into the optical frame (via homography, see below) and cropped; contour/shape analysis (rotor silhouette vs. bird body/wing shape) plus size estimation discriminates drone vs. bird vs. clutter. **Built, and bidirectional**: optical also detects independently and can cue thermal, which is what covers thermal crossover and cold-soaked airframes. See `docs/cross_cueing.md`. **Caveat**: at the Pi camera's configured 640x480 the optical IFOV equals the thermal IFOV (1.70 mrad/px both), so optical adds no shape information at range. Capturing a high-resolution crop on cue would take shape classification from ~18 m to ~94 m and is the highest-value change left.
 4. **Sensor fusion** — thermal confidence + optical confidence combined into a single confidence score and one unified track (directly answers the brief's "single coherent situational picture" requirement)
-5. **Alert dashboard** — one alert per object: timestamp, confidence, classification, location. Not yet built — explicit to-do.
+5. **Alert dashboard** — one alert per object: timestamp, confidence, classification, location. **Built** — Flask page, four live views, stateful alerts. See `docs/dashboard.md`.
 
 Rationale for thermal-first: thermal contrast against sky is strong even for small objects, and works day/night. Optical adds shape discrimination, which is the documented weak point of thermal-only systems (bird vs. drone false positives are a known unsolved problem in the literature).
 
@@ -108,6 +108,14 @@ The Mini2 Plus V2 isn't just a night-vision input — its readings (intensity/co
 Hours/days of apron observation establish a baseline: vehicles in designated areas, aircraft on expected corridors, birds around the perimeter, people in known operational zones, no drones ever seen. Then a small object appears — thermal flags a warm mover, optical shows a compact rotorcraft-like shape, classifier says drone = 0.86, but behaviorally it enters the restricted apron area on a trajectory outside anything in the learned baseline → site baseline flags "highly anomalous" → fusion combines classification confidence + anomaly score → high overall threat → ALERT. The alert comes from combining *what it is + how it looks thermally + where it is + how it's moving + whether that's normal here*, not from classification alone.
 
 ### Hackathon-scoped implementation (no big self-training NN)
+
+**Status: built.** `src/astravigil/site_intelligence/` learns a per-cell scene
+reference and activity model, persists it to `data/baseline/site.npz`, and
+scores each object on four channels (position, appearance, feature, dwell).
+`src/astravigil/fusion/threat.py` combines that with the classifier via a
+noisy-OR so neither signal can overrule the other, and
+`src/astravigil/alerting/` emits one stateful alert per object. Full write-up
+including the three failure modes that had to be closed: `docs/site_intelligence.md`.
 1. Detect and track objects locally on the Pi.
 2. Extract a feature vector per track (see feature list above).
 3. Store observations associated with the site.
@@ -175,7 +183,13 @@ Frame format: 256 x 344 uint16 LE per frame — rows 0-191 thermal, row 192 meta
 - The camera applies internal temporal filtering (74.7% of pixels bit-identical frame to frame), which may smear fast-crossing targets — untested
 - No SDR — ruled out RF-based detection/fingerprinting entirely
 - No defeat mechanism — challenge 04 doesn't require one (unlike challenge 01), so this is fully in scope
-- Alert dashboard not yet built
+- ~~Alert dashboard not yet built~~ — built; see `docs/dashboard.md`
+- The site baseline assumes a fixed camera. A bumped mount invalidates it exactly as it invalidates the homography, and there is no automatic detection of that yet
+- Site intelligence is validated **in simulation only**. The scenarios were written by the same person who wrote the thresholds; it demonstrates the mechanism, not real-world performance
+- No restricted-zone concept: the model learns where traffic goes, not which areas are off-limits
+- The two cameras are not time-synchronised: 0-40 ms of skew, ~6 px of misregistration on a fast crosser, zero on a stationary one
+- Optical detection is confined to the thermal footprint, which is only ~15% of the optical frame area; contacts outside it are reported but cannot be cross-checked on a fixed mount
+- **No neural network anywhere in the codebase.** Classification is hand-weighted rules over four interpretable features. MobileNetV3-Small and Miril-DroneVLM remain aspirations, not implementations - do not claim them
 - ~~OpenCV direct device access not fully solved~~ — resolved: raw USB driver in `src/astravigil/drivers/thermal/`, which also unlocked 16-bit temperature data the V4L2 path was discarding
 
 ## Reference / prior art (for the "why this is credible" slide)
@@ -184,13 +198,25 @@ Frame format: 256 x 344 uint16 LE per frame — rows 0-191 thermal, row 192 meta
 - Small drones occupy as few as 2x2 to 10x10 pixels at range in thermal — explains why range is fundamentally hard, not a hardware failure on our part
 
 ## Next steps
-1. Get Pi Camera Module 2 (optical) capturing alongside thermal
-2. Build the homography calibration script (mouse-click point picker → save `H` matrix)
-3. Visual sanity check: warp thermal frame into optical space, confirm alignment
-4. Build thermal anomaly detection (background subtraction / frame differencing)
-5. Build shape/size classification on cropped optical regions
-6. Fusion logic: combined confidence score, single track
-7. Alert dashboard (Streamlit/Flask) — timestamp, confidence, classification, location
-8. Capture real test footage (drone at various distances, birds/clutter as negative examples)
-9. Record backup demo video in case live demo fails on stage
-10. Prep slides: problem → architecture diagram → live/recorded demo → confusion matrix → honest limitations → what a production version would add
+
+Done: Pi Camera capturing alongside thermal; homography calibration script and
+ground-truth-scored sanity check; thermal anomaly detection; fusion into a
+single track; adaptive site intelligence with persistent baseline; alert
+dashboard.
+
+Remaining, in order of what the demo actually needs:
+
+1. **Capture real test footage** — drone at various distances, birds and
+   clutter as negative examples. Everything below the hardware line is still
+   simulation-validated only, and this is the critical path.
+2. **Learn a real site baseline on the Pi** — `scripts/learn_site.py --source hardware --minutes 20`,
+   then confirm a real object left in frame is caught after a restart. This is
+   the headline claim and it has only been shown in simulation.
+3. **Re-measure timings on the Pi 4** rather than trusting an 8x multiplier off
+   the laptop numbers; the budget at 25 Hz is no longer comfortable.
+4. Shape/size classification on the optical crop (the crop handoff exists,
+   nothing consumes it yet).
+5. Retune the classifier and the site thresholds against captured negatives.
+6. Record a backup demo video in case the live demo fails on stage.
+7. Prep slides: problem → architecture diagram → live/recorded demo →
+   confusion matrix → honest limitations → what a production version would add.

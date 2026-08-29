@@ -84,6 +84,7 @@ class Detection:
             "area_px": int(self.area),
             "parts": int(self.parts),
             "peak_c": round(float(self.peak_c), 1),
+            "mean_c": round(float(self.mean_c), 1),
             "hotspot_c": round(float(self.hotspot_c), 2),
             "contrast_c": round(float(self.contrast_c), 2),
             "aspect": round(float(self.aspect), 2),

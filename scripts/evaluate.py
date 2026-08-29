@@ -31,7 +31,7 @@ CLASSES = ["drone", "bird", "unknown"]
 def truth_positions(scene):
     """True target centres in thermal pixel coordinates, per class."""
     out = []
-    for tg in scene.targets:
+    for tg in scene.truth_targets:
         p = cv2.perspectiveTransform(
             np.float32([[[tg.x, tg.y]]]), scene.H_world_to_thermal)[0][0]
         if 0 <= p[0] < 256 and 0 <= p[1] < 192:
