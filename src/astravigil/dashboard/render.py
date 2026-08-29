@@ -26,9 +26,13 @@ import numpy as np
 from ..calibration import homography
 
 # How the thermal camera is mounted, in 90-degree anticlockwise steps applied
-# to the two thermal-space panes before they are shown. 1 = the sensor is on
-# its side and the scene needs turning a quarter turn anticlockwise to look
-# upright.
+# to the two thermal-space panes before they are shown.
+#
+# 3 on this rig: the sensor is on its side AND inverted, so a single
+# anticlockwise quarter turn left the scene upside down. Three of them - a
+# quarter turn clockwise - is what puts it the right way up. Measured on the
+# hardware, not derived: which way a camera ends up facing on a bracket is not
+# something the code can know.
 #
 # This is a VIEW setting, not a pipeline one. Detection, tracking, the site
 # model and the homography all keep working in the sensor's own coordinates,
@@ -36,7 +40,7 @@ from ..calibration import homography
 # still valid, and what keeps calibrate_homography.py - which fits H in sensor
 # space - agreeing with the overlay. Only the pixels an operator looks at are
 # turned, along with the boxes drawn on them.
-THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "1")) % 4
+THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "3")) % 4
 
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue
