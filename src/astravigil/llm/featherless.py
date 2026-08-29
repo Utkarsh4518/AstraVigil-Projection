@@ -41,6 +41,8 @@ import time
 import urllib.error
 import urllib.request
 
+from ..utils.env import env_float, env_int
+
 BASE_URL = os.environ.get("FEATHERLESS_BASE_URL",
                           "https://api.featherless.ai/v1")
 DEFAULT_MODEL = os.environ.get("FEATHERLESS_MODEL",
@@ -63,8 +65,8 @@ USER_AGENT = os.environ.get("FEATHERLESS_USER_AGENT", "AstraVigil/1.0")
 # time we are allowed to ask about that track again the object has usually
 # gone.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
-RETRIES = int(os.environ.get("FEATHERLESS_RETRIES", "2"))
-RETRY_BACKOFF_S = float(os.environ.get("FEATHERLESS_RETRY_BACKOFF_S", "2.0"))
+RETRIES = env_int("FEATHERLESS_RETRIES", 2)
+RETRY_BACKOFF_S = env_float("FEATHERLESS_RETRY_BACKOFF_S", 2.0)
 
 # Other models to try when the first is at capacity or does not exist, most
 # preferred first. Empty by default: a wrong guess at a model id is worse than

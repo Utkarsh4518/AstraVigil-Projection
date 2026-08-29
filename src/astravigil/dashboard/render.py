@@ -18,12 +18,11 @@ Boxes are coloured by threat level rather than by class. The class is still
 written in the label, but what an operator needs at a glance is which of the
 things on screen matters.
 """
-import os
-
 import cv2
 import numpy as np
 
 from ..calibration import homography
+from ..utils.env import env_int
 
 # How the thermal camera is mounted, in 90-degree anticlockwise steps applied
 # to the two thermal-space panes before they are shown.
@@ -40,7 +39,7 @@ from ..calibration import homography
 # still valid, and what keeps calibrate_homography.py - which fits H in sensor
 # space - agreeing with the overlay. Only the pixels an operator looks at are
 # turned, along with the boxes drawn on them.
-THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "3")) % 4
+THERMAL_VIEW_ROT = env_int("ASTRAVIGIL_THERMAL_ROT", 3) % 4
 
 # The same idea for the two optical-space panes. 2 on this rig: the Pi camera
 # is mounted inverted, so the scene needs a half turn to come up the right way.
@@ -48,7 +47,7 @@ THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "3")) % 4
 # Also a VIEW setting. The homography is fitted in the optical camera's own
 # coordinates and detections are mapped into them, so nothing upstream of the
 # draw call knows or cares which way up the pane is shown.
-OPTICAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_OPTICAL_ROT", "2")) % 4
+OPTICAL_VIEW_ROT = env_int("ASTRAVIGIL_OPTICAL_ROT", 2) % 4
 
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue

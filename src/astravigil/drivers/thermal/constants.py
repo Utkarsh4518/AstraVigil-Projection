@@ -2,7 +2,7 @@
 # Everything the driver needs to know about the hardware lives here, so the
 # tuning knobs that differ between boards sit in one file.
 
-import os
+from ...utils.env import env_int
 
 # USB identity. The same on every board - the driver finds the camera by
 # VID/PID, never by /dev/video* path, so port order and enumeration order
@@ -45,8 +45,8 @@ PROBE_LENGTH = 34
 # checking a different pair should not need a code change:
 #
 #   lsusb -v -d 2bdf:0102     # look for VideoStreaming Interface Descriptors
-STREAM_FORMAT_INDEX = int(os.environ.get("ASTRAVIGIL_FORMAT_INDEX", "1"))
-STREAM_FRAME_INDEX = int(os.environ.get("ASTRAVIGIL_FRAME_INDEX", "1"))
+STREAM_FORMAT_INDEX = env_int("ASTRAVIGIL_FORMAT_INDEX", 1)
+STREAM_FRAME_INDEX = env_int("ASTRAVIGIL_FRAME_INDEX", 1)
 
 # Byte offsets into the 34-byte probe/commit control block (UVC 1.1).
 PROBE_FORMAT_INDEX = 2       # bFormatIndex
@@ -98,8 +98,8 @@ HEADER_ERR = 0x40    # camera flagged this payload as bad
 # streaming driver is the wrong place to carry an optimisation nobody has run
 # on the target board. Override to experiment; do not change the default
 # without a Pi in front of you.
-READ_CHUNK_BYTES = int(os.environ.get("ASTRAVIGIL_READ_CHUNK", "16384"))
-READ_TIMEOUT_MS = int(os.environ.get("ASTRAVIGIL_READ_TIMEOUT_MS", "200"))
+READ_CHUNK_BYTES = env_int("ASTRAVIGIL_READ_CHUNK", 16384)
+READ_TIMEOUT_MS = env_int("ASTRAVIGIL_READ_TIMEOUT_MS", 200)
 
 # Reads time out constantly in normal running, so a handful of failures in a
 # row mean nothing. Only complain once it is clearly stuck.

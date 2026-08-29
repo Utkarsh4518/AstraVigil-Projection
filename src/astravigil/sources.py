@@ -21,6 +21,8 @@ import platform
 import cv2
 import numpy as np
 
+from .utils.env import env_float
+
 
 class Source:
     """Returns (thermal_raw16 (344,256) uint16, optical_bgr HxWx3 uint8)."""
@@ -133,7 +135,7 @@ class HardwareSource(Source):
         # Cold Pi 4: opening the device, committing the format and getting the
         # first frame out is not instant, and 5 s was tight enough to fail on
         # hardware that then worked fine by hand.
-        wait_s = float(os.environ.get("ASTRAVIGIL_THERMAL_WAIT_S", "12"))
+        wait_s = env_float("ASTRAVIGIL_THERMAL_WAIT_S", 12.0)
         if not self.stream.start(wait_s=wait_s):
             # Stop the capture thread BEFORE raising. It is holding the USB
             # device; letting the exception escape leaves it running, and the
