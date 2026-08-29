@@ -95,14 +95,16 @@ class Pipeline:
                  alerts=None, fps=25.0, clock="wall", learn=True,
                  cross_cue=True, optical_every_n=3, escalator=None,
                  escalate_at=0.75, policy=None, auto_calibrate=True,
-                 calibration_path=None):
+                 calibration_path=None, min_area=None):
         self.source = source
         self.H = H
         # Authored site policy - what is ALLOWED here, as opposed to what the
         # baseline has learned is normal here. Optional: with no policy the
         # system behaves exactly as before, judging on statistics alone.
         self.policy = policy
-        self.detector = ThermalDetector(threshold_c=threshold_c)
+        self.detector = ThermalDetector(
+            threshold_c=threshold_c,
+            **({"min_area": min_area} if min_area else {}))
         # Optical frames carry six times the pixels of thermal ones and far
         # more clutter, so this runs at a fraction of the rate. Thermal keeps
         # every frame: it is the primary sensor and it is the cheap one.

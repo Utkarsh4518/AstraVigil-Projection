@@ -66,8 +66,16 @@ MIN_INLIERS = 12
 MIN_DISTINCT_FRAMES = 8
 
 # Candidate pairs held. Enough for RANSAC to find a minority consensus,
-# bounded so a long run does not grow without limit.
-MAX_CANDIDATES = 1200
+# bounded so a long run does not grow without limit - and kept modest because
+# the cost of a fit grows with it.
+MAX_CANDIDATES = 600
+
+# Sampled frames between fit attempts. A fit is expensive and this runs inside
+# the capture loop, so trying one every time a frame contributed a pair is how
+# the dashboard ended up at 3.6 FPS with 250 ms in detect. There is nothing to
+# gain from it either: a fit that failed on 40 candidates is not going to
+# succeed on 46.
+FIT_EVERY_SAMPLES = 12
 
 # The primary thermal blob must move this far, in thermal pixels, before the
 # frame is worth sampling. At 25 Hz a walking person barely moves between
@@ -84,11 +92,15 @@ MIN_MINOR_FRAC = 0.05
 # Mean reprojection error over the inliers, in optical pixels.
 ACCEPT_PX = 8.0
 
-# RANSAC iterations. The default 2000 assumes a healthy inlier ratio; here it
-# can be one in six, where four-point samples land all-inlier about once in
-# 1300 tries. This is cheap - it runs on at most a few hundred points, only
-# while uncalibrated, and only on frames that added something.
-RANSAC_ITERS = 40000
+# RANSAC iterations, sized against the worst inlier ratio the per-frame caps
+# allow. Two thermal by three optical is one correct pair in six, so a
+# four-point sample is all-inlier about once in 1200 tries and ~6000 iterations
+# gives 99% confidence of finding one. 8000 leaves headroom.
+#
+# It was 40000, which is not free: 607 ms per fit against 120 ms at this value,
+# measured. Buying confidence far past the point of diminishing returns is
+# what made the capture loop stall.
+RANSAC_ITERS = 8000
 RANSAC_PX = 3.0
 
 
@@ -109,6 +121,7 @@ class AutoCalibrator:
         self.frame_of = []           # which frame each candidate came from
         self._last_primary = None
         self._frame = 0
+        self._since_fit = 0
 
         self.H = None
         self.error_px = None
@@ -166,6 +179,21 @@ class AutoCalibrator:
         if len(self.thermal_pts) < max(self.min_inliers, 8):
             self.reason = (f"{self.frames_sampled} usable frames, "
                            f"{len(self.thermal_pts)} candidate pairs")
+            return None
+
+        # Throttled, and only after a cheap look at whether a fit could
+        # possibly pass. Both guards exist because this runs inside the
+        # capture loop and a fit is the most expensive thing in it.
+        self._since_fit += 1
+        if self._since_fit < FIT_EVERY_SAMPLES:
+            return None
+        self._since_fit = 0
+
+        spread_ok, note = self.spread(self.thermal_pts, thermal_shape)
+        if not spread_ok:
+            # No fit can pass a spread test its own input already fails, and
+            # this costs microseconds where the fit costs a tenth of a second.
+            self.reason = note
             return None
 
         return self._try_fit(thermal_shape)

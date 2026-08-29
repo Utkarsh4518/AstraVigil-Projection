@@ -49,6 +49,22 @@ THERMAL_VIEW_ROT = env_int("ASTRAVIGIL_THERMAL_ROT", 3) % 4
 # draw call knows or cares which way up the pane is shown.
 OPTICAL_VIEW_ROT = env_int("ASTRAVIGIL_OPTICAL_ROT", 2) % 4
 
+# Whether nominal detections get a box drawn on them.
+#
+# The detector is built for warm movers against cold sky and deliberately
+# freezes anything it has detected out of its background model, so a hovering
+# target cannot dissolve into it. Indoors that assumption inverts: a room is
+# full of things warmer than the wall behind them, every one of them gets
+# frozen out on the first frame it crosses the threshold, and the pane fills
+# with boxes that never leave.
+#
+# The threat fusion already handles them correctly - they score nominal and
+# raise nothing. What they do is bury the one detection that matters in a
+# wall of labels, which is the failure mode the brief asks us not to produce.
+# So they are counted rather than drawn. Set ASTRAVIGIL_SHOW_NOMINAL=1 to see
+# every box again, which is what you want while tuning a threshold.
+SHOW_NOMINAL = env_int("ASTRAVIGIL_SHOW_NOMINAL", 0) != 0
+
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue
 COL_UNKNOWN = (150, 150, 160)
@@ -131,9 +147,13 @@ def thermal_view(result, scale=2):
     seen = assessment_map(result)
     fh, fw = result.thermal_c.shape
 
+    hidden = 0
     for det in result.detections:
-        x, y, w, h = det.box
         a = seen.get(det.track_id)
+        if not _worth_drawing(a):
+            hidden += 1
+            continue
+        x, y, w, h = det.box
         cv2.rectangle(img, (x, y), (x + w, y + h),
                       colour_for_level(a.level if a else "nominal"), 1)
     for an in result.static_anomalies:
@@ -149,9 +169,11 @@ def thermal_view(result, scale=2):
                      interpolation=cv2.INTER_NEAREST)
 
     for det in result.detections:
+        a = seen.get(det.track_id)
+        if not _worth_drawing(a):
+            continue
         rx, ry, _, _ = _rot_box(det.box, fw, fh)
         x, y = rx * scale, ry * scale
-        a = seen.get(det.track_id)
         col = colour_for_level(a.level if a else "nominal")
         tag = f"#{det.track_id} {det.label}"
         if a is not None:
@@ -164,8 +186,22 @@ def thermal_view(result, scale=2):
         _tag(img, f"SETTLED {an.dwell_s:.0f}s", rx * scale, ry * scale - 4,
              COL_SETTLED)
 
-    _banner(img, f"THERMAL {fw}x{fh}  {result.proc_ms:.2f} ms detect")
+    note = f"  +{hidden} nominal" if hidden else ""
+    _banner(img,
+            f"THERMAL {fw}x{fh}  {result.proc_ms:.2f} ms detect{note}")
     return img
+
+
+def _worth_drawing(assessment):
+    """A box on the picture is a claim on the operator's attention.
+
+    Nominal detections have already been judged as belonging here. Drawing
+    them anyway does not add information - it spends the one thing the pane
+    is for, which is showing what does not belong.
+    """
+    if SHOW_NOMINAL or assessment is None:
+        return True
+    return assessment.level != "nominal"
 
 
 def _uncalibrated_banner(result, what):

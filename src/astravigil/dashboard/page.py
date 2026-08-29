@@ -14,6 +14,14 @@ _PAGE = r"""<!doctype html>
     --fg:#e6edf3; --dim:#8b949e;
     --drone:#eb3c3c; --bird:#3caaeb; --unknown:#8b949e; --ok:#3fb950;
     --alert:#f0503c; --watch:#d29922; --nominal:#3fb950; --settled:#c964d6;
+    /* One height for every camera pane, stated rather than derived. Letting
+       each pane's aspect ratio decide its own height made them agree only
+       while the column widths came out exactly proportional, which gaps and
+       rounding do not guarantee - so the row looked ragged. Fixing the height
+       and letting the width follow the column makes them equal by
+       construction; contain then does nothing where the shapes match, and
+       letterboxes a few pixels where they do not. */
+    --view-h:44vh;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -137,8 +145,8 @@ _PAGE = r"""<!doctype html>
      at the edge of frame, which is exactly where something entering the site
      first appears. With the column matched to the image there is nothing left
      to letterbox, so contain costs nothing here. */
-  figure img { flex:none; width:100%; object-fit:contain;
-               display:block; background:#000; }
+  figure img { flex:none; width:100%; height:var(--view-h);
+               object-fit:contain; display:block; background:#000; }
   figure.thermal img { aspect-ratio:__TH_ASPECT__; }
   figure.optical img { aspect-ratio:__OP_ASPECT__; }
   figcaption { flex:1; padding:8px 12px; font-size:12px; color:var(--dim);

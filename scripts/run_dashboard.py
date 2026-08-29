@@ -157,6 +157,12 @@ def main():
                         "uncalibrated state")
     p.add_argument("--threshold", type=float, default=1.5,
                    help="detection threshold in degrees C above background")
+    p.add_argument("--min-area", type=int, default=None,
+                   help="smallest blob in pixels that counts as a detection "
+                        "(default 4, sized for a drone at 70 m). Indoors, "
+                        "where the scene is full of warm clutter rather than "
+                        "cold sky, raising this and --threshold together is "
+                        "what quietens the picture")
     p.add_argument("--alert-threshold", type=float, default=0.75,
                    help="threat score at which an alert opens")
     p.add_argument("--featherless", action="store_true",
@@ -219,7 +225,8 @@ def main():
     else:
         print("featherless      : off (local classification only)")
 
-    pipeline = Pipeline(source, H=H, threshold_c=args.threshold, policy=policy, site=site,
+    pipeline = Pipeline(source, H=H, threshold_c=args.threshold,
+                        min_area=args.min_area, policy=policy, site=site,
                         alerts=alerts, fps=args.fps,
                         learn=not args.no_learn, escalator=escalator,
                         escalate_at=args.escalate_at,
