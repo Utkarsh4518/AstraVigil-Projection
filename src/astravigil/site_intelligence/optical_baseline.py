@@ -99,6 +99,13 @@ class OpticalBaseline:
         self.tone_var = np.zeros(g, np.float32)
         self.ref_n = np.zeros(g, np.float32)
         self.persist = np.zeros(g, np.int32)
+        # How often each cell is off its baseline: the optical equivalent of
+        # learned traffic. This, not coverage, is the interesting map. Once
+        # the model matures every cell has full history, so a coverage map is
+        # uniform - it draws as a flat wash over the whole frame and says
+        # nothing. Where change actually happens is sparse, and sparse is
+        # what an operator can read.
+        self.activity = np.zeros(g, np.float32)
 
         self._z = np.zeros(g, np.float32)
         self.frames = 0
@@ -120,6 +127,7 @@ class OpticalBaseline:
             "learning": bool(self.learning),
             "anomalous_cells": int((self._z > Z_ANOMALOUS).sum()),
             "settled_cells": int((self.persist >= self.persist_frames).sum()),
+            "active_cells": int((self.activity > 0.02).sum()),
             "cells": int(self.gh * self.gw),
         }
 
@@ -190,6 +198,9 @@ class OpticalBaseline:
 
         hot = z > Z_ANOMALOUS
         self.persist = np.where(hot, self.persist + 1, 0)
+        # Slower than the reference update, so a corridor used once a minute
+        # still shows up next to one used constantly.
+        self.activity += 0.01 * (hot.astype(np.float32) - self.activity)
 
         if learn:
             # Exponential update with a floor, so a cell that has been quiet

@@ -106,8 +106,15 @@ FIT_EVERY_SAMPLES = 12
 # a detection in most of the last few seconds is furniture; a cell holding one
 # now and not a moment ago is something happening. So occupancy is counted
 # over a window and the busy cells are excluded.
+#
+# The threshold has to sit close to 1.0, not near the middle. A desk edge is
+# in its cell on essentially every frame; somebody waving deliberately in one
+# part of the view is in a given cell well over half of them. At 0.55 the
+# operator's own hand was being classified as furniture and discarded, so
+# moving MORE made calibration collect LESS - the exact opposite of the
+# instruction the pane was giving them.
 SCENERY_WINDOW = 90          # frames of occupancy history
-SCENERY_FRACTION = 0.55      # occupied at least this often -> scenery
+SCENERY_FRACTION = 0.85      # occupied at least this often -> scenery
 SCENERY_WARMUP = 30          # frames before any of it is trusted
 THERMAL_CELL_PX = 8
 OPTICAL_CELL_PX = 24

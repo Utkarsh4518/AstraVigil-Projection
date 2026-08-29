@@ -388,9 +388,14 @@ def optical_site_view(result, site, scale=1):
     thermal site pane on the screen - and this half is the one that sees the
     object with no heat signature at all.
 
-    Green is coverage: how much history a cell has, and therefore how much its
-    opinion is worth. Magenta is a cell that has looked wrong for long enough
-    to be an object rather than someone walking past.
+    Green is where change normally happens - the optical equivalent of the
+    learned traffic on the thermal pane. Coverage was the obvious thing to
+    draw and it is useless: once the model matures every cell has full
+    history, so the map is uniform and washes the whole frame flat green.
+    What an operator needs is the sparse thing, not the saturated one.
+
+    Magenta has looked wrong long enough to be an object; amber is off
+    baseline right now.
     """
     if result.optical is None:
         return None
@@ -402,15 +407,21 @@ def optical_site_view(result, site, scale=1):
 
     h, w = img.shape[:2]
 
-    # Green: learned coverage. Square-rooted for the same reason the thermal
-    # pane does it - a corner with a little history should still be visible
-    # next to the middle of the frame, which has all of it.
-    cover = np.clip(site.ref_n / max(MIN_LEARNED_FRAMES, 1), 0, 1)
-    cover = cv2.resize(np.sqrt(cover), (w, h),
+    # While it is still learning, coverage IS the interesting map - it shows
+    # the model filling in, and an empty corner is the operator's cue that
+    # part of the frame has not been modelled yet.
+    if site.learning:
+        field = np.clip(site.ref_n / max(MIN_LEARNED_FRAMES, 1), 0, 1)
+    else:
+        # Once mature, coverage is uniform and tells you nothing. Switch to
+        # where things actually happen, normalised against the busiest cell so
+        # a quiet corner is still visible next to a doorway.
+        field = site.activity / max(float(site.activity.max()), 1e-6)
+    field = cv2.resize(np.sqrt(np.clip(field, 0, 1)), (w, h),
                        interpolation=cv2.INTER_NEAREST)
     green = np.zeros_like(img)
-    green[:, :, 1] = (cover * 190).astype(np.uint8)
-    img = cv2.addWeighted(img, 1.0, green, 0.45, 0)
+    green[:, :, 1] = (field * 190).astype(np.uint8)
+    img = cv2.addWeighted(img, 1.0, green, 0.40, 0)
 
     # Magenta outline: cells that have been off baseline long enough to be an
     # object. Outlined rather than filled, so what is underneath stays
@@ -437,10 +448,14 @@ def optical_site_view(result, site, scale=1):
                          interpolation=cv2.INTER_NEAREST)
 
     st = site.stats()
-    state = "LEARNING" if st["learning"] else "LEARNED"
-    _banner(img, f"OPTICAL SITE {state}  scene {st['maturity'] * 100:.0f}%  "
-                 f"off-baseline {st['anomalous_cells']}  "
-                 f"settled {st['settled_cells']}")
+    if st["learning"]:
+        _banner(img, f"OPTICAL SITE LEARNING  coverage "
+                     f"{st['maturity'] * 100:.0f}%  (green fills in as each "
+                     f"cell gains history)")
+    else:
+        _banner(img, f"OPTICAL SITE LEARNED  green = where change normally "
+                     f"happens ({st['active_cells']} cells)  off-baseline "
+                     f"{st['anomalous_cells']}  settled {st['settled_cells']}")
     return img
 
 
