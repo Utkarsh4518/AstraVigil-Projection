@@ -118,6 +118,43 @@ ACTIVITY_FULL = 0.25
 # it.
 MAX_DEV_SIGMA = 4.0
 
+# Above this many cells a settled patch is scenery changing - a door left
+# open, a curtain drawn, the sun moving across a wall - rather than an object
+# that has arrived. Set to the same fraction of frame area the thermal model
+# uses: 80 cells of 8 px is a tenth of a 192x256 frame, and 30 cells of 32 px
+# is a tenth of a 480x640 one.
+MAX_REGION_CELLS = 30
+
+
+class OpticalRegion:
+    """A patch of the optical scene that has looked wrong long enough to be
+    an object. The optical mirror of the thermal model's StaticAnomaly.
+
+    This is the ONLY optical channel that can see something stationary. The
+    optical detector is motion-based, so an object that arrives and then stops
+    fades out of it within seconds - a mug of hot water put down on a shelf is
+    gone from the detector long before anyone asks about it. The baseline
+    keeps reporting that patch for as long as it does not look the way this
+    camera learned it looks, which is exactly as long as the object is there.
+    """
+
+    __slots__ = ("box", "cells", "dwell_s", "peak_z", "centroid", "key")
+
+    def __init__(self, box, cells, dwell_s, peak_z, centroid, key):
+        self.box = box                  # (x, y, w, h) in OPTICAL pixels
+        self.cells = cells
+        self.dwell_s = dwell_s
+        self.peak_z = peak_z
+        self.centroid = centroid
+        self.key = key                  # assigned by OpticalBaseline
+
+    def as_dict(self):
+        return {"key": self.key,
+                "box": [int(v) for v in self.box],
+                "cells": int(self.cells),
+                "dwell_s": round(float(self.dwell_s), 1),
+                "peak_z": round(float(self.peak_z), 2)}
+
 
 class OpticalBaseline:
     def __init__(self, shape=(480, 640), cell_px=CELL_PX, fps=25.0,
@@ -146,6 +183,10 @@ class OpticalBaseline:
         self.activity = np.zeros(g, np.float32)
 
         self._z = np.zeros(g, np.float32)
+        # Last frame's settled patches, as (box, key). Identity for a patch
+        # comes from overlapping one of these, not from where its centroid
+        # happens to round to - see _region_key.
+        self._prev_regions = []
         self.frames = 0
         self.created = time.time()
 
@@ -319,6 +360,65 @@ class OpticalBaseline:
             reasons.append(f"optically changed for {secs:.0f} s - something "
                            f"is sitting there")
         return novelty, reasons
+
+    def settled_regions(self):
+        """Patches that have looked wrong long enough to be objects.
+
+        Guarded on maturity for the same reason score() is: a model that has
+        learned nothing has no grounds to call anything unusual, and every
+        cell of an empty model is off its own non-existent baseline.
+        """
+        settled = ((self.persist >= self.persist_frames).astype(np.uint8)
+                   if not self.learning else None)
+        if settled is None or not settled.any():
+            # Nothing there - so nothing to carry an identity forward from
+            # either. A patch that comes back after this is genuinely new.
+            self._prev_regions = []
+            return []
+
+        n, labels, stats, cents = cv2.connectedComponentsWithStats(settled, 8)
+        out = []
+        for i in range(1, n):
+            cells = int(stats[i, cv2.CC_STAT_AREA])
+            if cells > MAX_REGION_CELLS:
+                continue                    # scenery-scale, not a target
+            m = labels == i
+            gx, gy = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+            gw, gh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            box = (int(gx * self.cell_px), int(gy * self.cell_px),
+                   int(gw * self.cell_px), int(gh * self.cell_px))
+            centroid = (float(cents[i][0] * self.cell_px),
+                        float(cents[i][1] * self.cell_px))
+            out.append(OpticalRegion(
+                box=box, cells=cells,
+                dwell_s=float(self.persist[m].max()) / max(self.fps, 1e-6),
+                peak_z=float(self._z[m].max()),
+                centroid=centroid,
+                key=self._region_key(box, centroid)))
+        out.sort(key=lambda r: r.dwell_s, reverse=True)
+        self._prev_regions = [(r.box, r.key) for r in out]
+        return out
+
+    def _region_key(self, box, centroid):
+        """A name for this patch that survives the patch changing shape.
+
+        A quantised centroid on its own is not an identity. A patch that grows
+        by one cell moves its centroid by half a cell, and a centroid that
+        crosses a quantisation boundary renames the object - which renumbers
+        its badge on every pane at once, which destroys the one thing the
+        number exists to do.
+
+        Overlapping the previous frame's patch is what actually means "this is
+        the same thing", so that wins. The quantised centroid is only used to
+        mint a name for a patch that is genuinely new.
+        """
+        ax, ay, aw, ah = box
+        for (bx, by, bw, bh), key in self._prev_regions:
+            if (ax < bx + bw and bx < ax + aw
+                    and ay < by + bh and by < ay + ah):
+                return key
+        return (f"optical-static:{int(centroid[1]) // 64}:"
+                f"{int(centroid[0]) // 64}")
 
     def z_map(self):
         """The z-scores at frame resolution, for drawing."""

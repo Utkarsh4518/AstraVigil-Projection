@@ -168,8 +168,11 @@ _PAGE = r"""<!doctype html>
   .trail .t { text-align:right; font-variant-numeric:tabular-nums; }
   .trail .empty { color:var(--dim); margin:6px 0; }
 
-  /* The number drawn on the object itself, so a row in this list and a badge
-     on the picture are visibly the same thing. */
+  /* The object number drawn on the object itself, so a row in this list and
+     a badge on the picture are visibly the same thing. Deliberately NOT called
+     a "cue" anywhere an operator can read: this dashboard already uses
+     "cross-cue" for one camera asking the other a question, and a column
+     headed CUE read as a claim that a question had been asked. */
   .cue { display:inline-block; min-width:22px; text-align:center;
          padding:0 5px; border:1px solid var(--line); border-radius:5px;
          background:#0d1014; color:var(--fg); font-size:11px;
@@ -298,11 +301,17 @@ _PAGE = r"""<!doctype html>
       <figcaption>Site model — green is learned traffic, magenta is a patch
         that has been off its learned temperature long enough to be an object.
         Numbered boxes are what the model is being fed right now; the same
-        number appears on every other pane and in the cross-cue list.</figcaption>
+        object number appears on every other pane and in the tracks table.</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/optical" alt="optical">
-      <figcaption>Optical — thermal detections mapped through the homography.</figcaption>
+      <figcaption>Optical — thermal detections mapped through the homography,
+        plus what this camera found on its own: yellow is something moving that
+        no thermal detection claimed, magenta is a patch its site model says has
+        been sitting there. Those two need no homography, so they are still drawn
+        while the rig is calibrating — but an object seen by only one sensor
+        cannot share a number with the other, because nothing yet knows they are
+        the same thing.</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/optical_site" alt="optical site">
@@ -311,7 +320,9 @@ _PAGE = r"""<!doctype html>
         outlined square has none yet. Once learned, green is where change
         normally happens — an empty map means nothing has moved through, which
         is a real answer. Magenta has looked wrong long enough to be an
-        object; amber is off baseline right now.</figcaption>
+        object and is numbered — this is the only optical channel that can see
+        something which has stopped moving, since the detector loses it within
+        seconds. Amber is off baseline right now.</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/overlay" alt="overlay">
@@ -328,7 +339,7 @@ _PAGE = r"""<!doctype html>
   <h2>Tracks</h2>
   <table>
     <thead><tr>
-      <th>Cue</th><th>Track</th><th>Class</th><th>Conf</th><th>Threat</th>
+      <th>Obj</th><th>Track</th><th>Class</th><th>Conf</th><th>Threat</th>
       <th>Site</th>
       <th>Still</th><th>Peak °C</th><th>Hotspot</th>
       <th>Area px</th><th>Parts</th><th>Flap</th><th>Straight</th><th>Frames</th>

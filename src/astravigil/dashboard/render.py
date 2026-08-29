@@ -265,11 +265,57 @@ def _uncalibrated_banner(result, what):
     return f"{what} - auto-calibrating: {auto['reason']}"
 
 
+def _draw_optical_own(img, result, fw, fh, scale=1, labels=True):
+    """What the optical camera has without any help from thermal.
+
+    Two channels, both already in optical coordinates and neither needing a
+    homography: what its motion detector found this frame, and what its site
+    model says has been sitting there. The second one matters most - a motion
+    detector loses a mug of hot water seconds after it is put down, and the
+    baseline goes on reporting that patch for as long as the mug is there.
+
+    Because neither needs a mapping, this is also what an uncalibrated rig can
+    still show. It is not the same object as the thermal one, and it is not
+    numbered as though it were: without a homography nothing can know that the
+    warm blob and this patch are one thing. It is at least visible and
+    countable, which a blank pane is not.
+
+    Draws AFTER rotation, in rotated coordinates, so the numbers stay upright.
+    """
+    cues = _cues(result)
+    ocues = getattr(result, "optical_cues", None) or {}
+    # Thinner on the site pane, which already draws these patches as cell
+    # contours - there the rectangle is only there to hang the number on.
+    weight = 2 if labels else 1
+    for od in result.optical_detections:
+        if od.thermal_match is not None:
+            continue
+        rx, ry, rw, rh = [v * scale for v in
+                          _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)]
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_OPTICAL, weight)
+        _mark(img, ocues.get(tuple(od.box)),
+              "OPTICAL ONLY" if labels else "", rx, ry - 19, COL_OPTICAL, 0.45)
+
+    for r in getattr(result, "optical_regions", None) or []:
+        rx, ry, rw, rh = [v * scale for v in
+                          _rot_box(r.box, fw, fh, OPTICAL_VIEW_ROT)]
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_SETTLED, weight)
+        _mark(img, cues.get(r.key),
+              f"SETTLED {r.dwell_s:.0f}s" if labels else "",
+              rx, ry - 19, COL_SETTLED, 0.45)
+
+
 def optical_view(result, H):
     img = result.optical.copy()
     fh, fw = img.shape[:2]          # before rotation - _rot_box needs these
     if H is None:
+        # No homography, so no thermal detection can be placed on this pane.
+        # That is not a reason to show nothing: what the optical camera found
+        # by itself needs no mapping, and drawing it is the difference between
+        # a pane that says what this camera can see unaided and a pane that is
+        # blank until somebody calibrates the rig.
         img = _rot_image(img, OPTICAL_VIEW_ROT)
+        _draw_optical_own(img, result, fw, fh)
         _banner(img, _uncalibrated_banner(result, "OPTICAL"))
         return img
 
@@ -280,12 +326,6 @@ def optical_view(result, H):
     if roi is not None:
         rx, ry, rw, rh = roi
         cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), (90, 90, 100), 1)
-
-    optical_only = [od for od in result.optical_detections
-                    if od.thermal_match is None]
-    for od in optical_only:
-        x, y, w, h = od.box
-        cv2.rectangle(img, (x, y), (x + w, y + h), COL_OPTICAL, 2)
 
     mapped = []
     for det in result.detections:
@@ -308,11 +348,10 @@ def optical_view(result, H):
     img = _rot_image(img, OPTICAL_VIEW_ROT)
 
     cues = _cues(result)
-    ocues = getattr(result, "optical_cues", None) or {}
-    for od in optical_only:
-        rx, ry, _, _ = _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)
-        _mark(img, ocues.get(tuple(od.box)), "OPTICAL ONLY", rx, ry - 21,
-              COL_OPTICAL, 0.45)
+    # Optical's own contacts and settled patches, on the same pane as the
+    # mapped thermal ones, so a numbered box that appears on only one of the
+    # two sensors is visibly that rather than an omission.
+    _draw_optical_own(img, result, fw, fh)
 
     for box, det, a, col in mapped:
         rx, ry, _, _ = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
@@ -583,15 +622,10 @@ def optical_site_view(result, site, scale=1):
         img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                          interpolation=cv2.INTER_NEAREST)
 
-    # The optical camera's own contacts, numbered the same as everywhere else.
-    ocues = getattr(result, "optical_cues", None) or {}
-    for od in result.optical_detections:
-        if od.thermal_match is not None:
-            continue
-        rx, ry, rw, rh = [v * scale for v in
-                          _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)]
-        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_OPTICAL, 1)
-        _mark(img, ocues.get(tuple(od.box)), "", rx, ry - 19, COL_OPTICAL)
+    # The optical camera's own contacts and settled patches, numbered the same
+    # as everywhere else. Labels off: this pane is already a dense grid, and
+    # the number is the part that ties it to the other four.
+    _draw_optical_own(img, result, fw, fh, scale=scale, labels=False)
 
     st = site.stats()
     if learning:

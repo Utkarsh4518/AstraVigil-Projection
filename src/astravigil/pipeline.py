@@ -58,7 +58,7 @@ class Result:
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
                  "healthy", "assessments", "alerts", "static_anomalies",
                  "site_stats", "optical_site_stats", "cross_log",
-                 "cue_numbers", "optical_cues", "novelty",
+                 "cue_numbers", "optical_cues", "optical_regions", "novelty",
                  "optical_detections",
                  "optical_evidence", "cross", "optical_roi", "learning",
                  "identifications", "escalation")
@@ -97,6 +97,7 @@ class Result:
         # can be found on five views, in the trail and in the table.
         self.cue_numbers = {}          # key -> small int
         self.optical_cues = {}         # optical-only box tuple -> small int
+        self.optical_regions = []      # optical site model's settled patches
         self.optical_roi = None        # where optical is allowed to look
         self.learning = {}             # operator-driven learning run
         self.identifications = {}      # key -> remote model's answer
@@ -322,14 +323,21 @@ class Pipeline:
 
         # --- the optical camera doing its own job, not just answering
         optical_dets, pairs, unmatched_optical = [], {}, []
+        ran_optical = False
 
         # No homography yet: run the optical detector over the WHOLE frame -
         # there is no thermal footprint to confine it to until we have one -
         # and let the calibrator watch for frames it can pair unambiguously.
         if (self.autocal is not None and self.H is None
                 and self.cross_cue and optical is not None):
-            found = self.optical.update(optical)
-            H_new = self.autocal.observe(detections, found,
+            # Keep what it found. This used to be handed to the calibrator and
+            # then dropped, so res.optical_detections stayed empty for as long
+            # as the rig was uncalibrated - which left both optical panes
+            # completely blank at exactly the moment an operator is watching
+            # them to see whether anything is working at all.
+            optical_dets = self.optical.update(optical)
+            ran_optical = True
+            H_new = self.autocal.observe(detections, optical_dets,
                                          res.thermal_c.shape)
             if H_new is not None:
                 self.H = H_new
@@ -341,7 +349,11 @@ class Pipeline:
                 self.optical.set_roi_from_homography(
                     self.H, res.thermal_c.shape, optical.shape, pad=12)
                 self._roi_set = True
-            optical_dets = self.optical.update(optical)
+            # On the frame the calibration lands, the detector has already run
+            # once over the whole frame. Running it again here would put two
+            # updates of the same frame into the background model.
+            if not ran_optical:
+                optical_dets = self.optical.update(optical)
             pairs, unmatched_optical = associate(detections, optical_dets,
                                                  self.H)
 
@@ -454,6 +466,35 @@ class Pipeline:
                 f"{dwell:.0f} s - is it warm?",
                 self._thermal_answer(th), oa.threat)
 
+        # Uncalibrated: nothing above ran, because every one of those paths
+        # needs a homography to know where thermal is looking. The contacts
+        # still get numbers and still get drawn. They are deliberately NOT
+        # assessed - with no mapping, thermal cannot be asked whether the
+        # thing is warm, and a threat score built on an unaskable question is
+        # worse than no score.
+        if self.H is None:
+            for odet in optical_dets:
+                key = self.optical_contacts.key_for(odet.centroid)
+                optical_cues[tuple(odet.box)] = self.cues.number(key, now)
+
+        # What the OPTICAL site model can see sitting there. The optical
+        # detector is motion-based, so an object that arrives and stops falls
+        # out of it within seconds; this is the only optical channel that
+        # keeps reporting one. Needs no homography, so it works on an
+        # uncalibrated rig - which is the whole point of drawing it.
+        optical_regions = []
+        if self.optical_site is not None:
+            optical_regions = self.optical_site.settled_regions()
+            if self.H is not None and detections:
+                # Calibrated: a thermal track already carries this object and
+                # already has a number. Reporting the patch as well would put
+                # two different numbers on one thing.
+                mapped = [homography.map_box(self.H, d.box) for d in detections]
+                optical_regions = self._unclaimed_regions(optical_regions,
+                                                          mapped)
+            for r in optical_regions:
+                self.cues.number(r.key, now)
+
         # Number everything on screen, then release the numbers of things
         # that have been gone a while. Pruning after the refresh, never
         # before, or an object present this very frame loses its number.
@@ -488,6 +529,7 @@ class Pipeline:
         res.cross_log = list(self.cross_log)
         res.cue_numbers = self.cues.snapshot()
         res.optical_cues = optical_cues
+        res.optical_regions = optical_regions
         res.learning = self.learning_status()
         res.identifications = {
             a.key: self.escalator.result_for(a.key).as_dict()
@@ -590,6 +632,26 @@ class Pipeline:
                     break
             if not claimed:
                 out.append(a)
+        return out
+
+    @staticmethod
+    def _unclaimed_regions(regions, boxes, pad=16):
+        """Drop optical settled patches that a thermal detection already has.
+
+        The optical mirror of _unclaimed_statics, taking already-mapped boxes
+        because the caller has done the homography once for all of them. The
+        pad is larger than the thermal one because these are optical pixels -
+        the same physical slop covers more of them.
+        """
+        if not boxes:
+            return regions
+        out = []
+        for r in regions:
+            ax, ay, aw, ah = r.box
+            if not any(ax < bx + bw + pad and bx < ax + aw + pad
+                       and ay < by + bh + pad and by < ay + ah + pad
+                       for bx, by, bw, bh in boxes):
+                out.append(r)
         return out
 
     # ------------------------------------------------------------ site model

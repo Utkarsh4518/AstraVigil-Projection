@@ -12,6 +12,12 @@ at something on one pane and find the same thing on the other four, and in the
 trail, and in the table. That wants ONE number, small enough to read at a
 glance on a quarter-height pane, and the same number everywhere.
 
+On screen these are called OBJECT numbers, never cue numbers. "Cross-cue" is
+already this dashboard's word for one camera asking the other a question, and
+a table column headed CUE read as a claim that a question had been asked about
+that row - which is exactly the thing it does not mean. The internal names
+stay `cue` because within the code the number is a visual cue and nothing else.
+
 So numbers are handed out here, on first sight, and recycled once an object
 has been gone long enough that reusing its number cannot confuse anybody.
 Recycling is the whole point: a board that only ever counts upwards produces
