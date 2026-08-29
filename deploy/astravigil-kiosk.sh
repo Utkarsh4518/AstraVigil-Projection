@@ -29,6 +29,7 @@ LOG="${HOME}/.astravigil-kiosk.log"
 LOCK="${RUN_DIR}/kiosk.lock"
 BROWSER_PID_FILE="${RUN_DIR}/browser.pid"
 DASH_PID_FILE="${RUN_DIR}/dashboard.pid"
+LAUNCHER_PID_FILE="${RUN_DIR}/launcher.pid"
 
 # Extra arguments for run_dashboard.py. Override in the .desktop file or the
 # environment, e.g. ASTRAVIGIL_ARGS="--source hardware --site-model data/baseline/site.npz"
@@ -74,13 +75,64 @@ already_up() { curl -fsS --max-time 2 "http://localhost:${PORT}/api/state" >/dev
 browser_alive() {
     local pid
     pid="$(cat "$BROWSER_PID_FILE" 2>/dev/null)" || return 1
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    # kill -0 only proves *something* owns that number. PIDs are recycled, and
+    # a stale file that happens to name a live process is how the launcher ends
+    # up insisting a console is open that is not on the screen.
+    [ -r "/proc/$pid/cmdline" ] || return 0
+    grep -qa "chrome-profile" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+# Is another *launcher* actually alive? Neither the lock nor a pid file can
+# answer that alone: the lock says only that some descriptor somewhere holds
+# it, and a pid file outlives the process that wrote it.
+launcher_alive() {
+    local pid
+    pid="$(cat "$LAUNCHER_PID_FILE" 2>/dev/null)" || return 1
+    [ -n "$pid" ] && [ "$pid" != "$$" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 0
+    grep -qa "astravigil-kiosk" "/proc/$pid/cmdline" 2>/dev/null
 }
 
 mkdir -p "$RUN_DIR"
+
+# The guard has to fail OPEN. Refusing to start is the expensive answer: from
+# the desktop it is indistinguishable from a dead icon, and the operator has
+# nothing to act on. So it is only ever given when another launcher is
+# demonstrably alive - never because a tool is missing, and never because a
+# lock outlived the process that took it.
+HELD_LOCK=0
+release_lock() {
+    if [ "$HELD_LOCK" -eq 1 ]; then
+        HELD_LOCK=0
+        # Closing the descriptor is what releases the flock. The file stays -
+        # see the note in _teardown.sh about why unlinking it is worse.
+        exec 9>&-
+    fi
+    [ "$(cat "$LAUNCHER_PID_FILE" 2>/dev/null)" = "$$" ] && rm -f "$LAUNCHER_PID_FILE"
+    return 0
+}
+
 exec 9>"$LOCK"
+CONTENDED=0
+if command -v flock >/dev/null 2>&1; then
+    if flock -n 9; then HELD_LOCK=1; else CONTENDED=1; fi
+else
+    # util-linux is not installed. Without this branch `! flock -n 9` is a
+    # command-not-found - non-zero, and therefore read as "the lock is held" -
+    # which sends every launch, including the very first one on a fresh
+    # machine, down the "still starting" path. The icon then never opens and
+    # never explains itself.
+    log "flock is not installed - falling back to a pid check"
+    if launcher_alive; then CONTENDED=1; else HELD_LOCK=1; fi
+fi
+[ "$HELD_LOCK" -eq 1 ] && echo $$ >"$LAUNCHER_PID_FILE"
+trap release_lock EXIT
+
 REATTACH=0
-if ! flock -n 9; then
+if [ "$CONTENDED" -eq 1 ]; then
     if browser_alive; then
         log "console already open - nothing to do"
         notify "The AstraVigil console is already open.
@@ -95,15 +147,59 @@ To close it:  $REPO/deploy/stop-kiosk.sh"
         # opening a browser does not do that.
         log "pipeline already running - reopening the console only"
         REATTACH=1
-    else
-        log "another instance is mid-startup"
-        notify "AstraVigil is still starting - give it a moment."
+    elif launcher_alive; then
+        HOLDER="$(cat "$LAUNCHER_PID_FILE" 2>/dev/null)"
+        log "launcher $HOLDER is mid-startup - leaving it to finish"
+        notify "AstraVigil is still starting (pid $HOLDER).
+
+Give it up to 90 seconds. If the console still does not appear:
+    $REPO/deploy/stop-kiosk.sh
+and then double-click the icon again.
+
+Log: $LOG"
         exit 0
+    else
+        # Nothing listening, no console, and no launcher to wait for: the lock
+        # outlived whatever held it. This is the state that used to answer
+        # "still starting" on every double-click, for ever - an unverified
+        # claim about a process that no longer existed.
+        log "stale lock, no live launcher - taking it over"
+        rm -f "$LAUNCHER_PID_FILE"
+        if command -v flock >/dev/null 2>&1; then
+            exec 9>&-
+            exec 9>"$LOCK"
+            if flock -n 9; then HELD_LOCK=1; else
+                log "lock still held by an orphaned descriptor - proceeding anyway"
+            fi
+        else
+            HELD_LOCK=1
+        fi
+        echo $$ >"$LAUNCHER_PID_FILE"
     fi
 fi
 
+# Set by start_dashboard, so a failed start can take back what it started.
+DASH_SUPERVISOR_PID=""
+stop_dashboard() {
+    [ -n "$DASH_SUPERVISOR_PID" ] || return 0
+    # Supervisor first, or it will helpfully restart the pipeline we are about
+    # to stop. TERM only, never -9: the pipeline is holding the camera.
+    kill "$DASH_SUPERVISOR_PID" 2>/dev/null
+    DASH_SUPERVISOR_PID=""
+    pkill -TERM -f "scripts/run_dashboard.py --port $PORT" 2>/dev/null
+    rm -f "$DASH_PID_FILE"
+    return 0
+}
+
 die() {
     log "FAILED: $1"
+    # Give back the pipeline and the lock BEFORE the dialog. notify() is modal
+    # and blocks until somebody clicks OK - and it used to block while still
+    # holding the lock, so one failed start turned every later double-click
+    # into "AstraVigil is still starting", permanently, with the dialog that
+    # explained why sitting unread behind the fullscreen splash.
+    stop_dashboard
+    release_lock
     notify "AstraVigil could not start.
 
 $1
@@ -127,6 +223,13 @@ done
 [ -n "$BROWSER" ] || die "No Chromium found. Install it with:
     sudo apt install -y chromium-browser"
 
+# Every readiness check in this script is a curl. Without it the pipeline is
+# never seen to come up, however well it is running, and the launcher waits
+# the full 90 s before failing for a reason that has nothing to do with the
+# sensor.
+command -v curl >/dev/null 2>&1 || die "curl is not installed. Install it with:
+    sudo apt install -y curl"
+
 log "repo=$REPO python=$PY browser=$BROWSER port=$PORT"
 
 # Say something immediately. Starting the pipeline and warming the camera can
@@ -144,6 +247,10 @@ fi
 # with RESTART_EXIT_CODE and this brings it straight back up.
 start_dashboard() {
     (
+        # Do NOT inherit the lock. A background subshell holding fd 9 keeps the
+        # single-instance lock alive long after the launcher has exited, so the
+        # next double-click finds a locked file with nothing behind it.
+        exec 9>&-
         cd "$REPO" || exit 1
         while true; do
             log "starting pipeline: $PY scripts/run_dashboard.py --port $PORT $ARGS"
@@ -159,7 +266,8 @@ start_dashboard() {
             break
         done
     ) &
-    echo $! >"$DASH_PID_FILE"
+    DASH_SUPERVISOR_PID=$!
+    echo "$DASH_SUPERVISOR_PID" >"$DASH_PID_FILE"
 }
 
 if already_up; then
@@ -226,8 +334,13 @@ cleanup() {
     # other way). Never -9 the pipeline here: it is holding the camera.
     kill "$BROWSER_PID" 2>/dev/null
     rm -f "$BROWSER_PID_FILE"
+    release_lock
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# A bare `trap cleanup TERM` runs cleanup and then carries on round the
+# watchdog loop, so stop-kiosk.sh had to escalate to SIGKILL to be rid of a
+# launcher that had already tidied up after itself.
+trap 'cleanup; exit 0' INT TERM
 
 # ------------------------------------------------------------- watchdog
 # Poll for the escape sequence. The page cannot close a kiosk window itself -
@@ -243,6 +356,9 @@ while kill -0 "$BROWSER_PID" 2>/dev/null; do
         # half-state that was hard to reason about and hard to restart. A
         # demo rig wants the icon to be the only control there is.
         astravigil_teardown keep-launcher 2>&1 | while IFS= read -r l; do log "$l"; done
+        # Before the modal, not after: it blocks until somebody clicks OK, and
+        # the whole point of the message is that the icon is ready to go again.
+        release_lock
         notify "AstraVigil stopped.
 
 Everything has been shut down and the camera released.

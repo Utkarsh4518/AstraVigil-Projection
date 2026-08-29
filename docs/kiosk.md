@@ -122,6 +122,33 @@ the moment it starts - an icon that produces no visible response for half a
 minute gets double-clicked again, and the second click would be met with a
 confusing "already running".
 
+**The guard fails open, and that is deliberate.** Refusing to start is the
+expensive answer here: from the desktop it looks exactly like a dead icon, and
+it hands the operator nothing to act on. So *"still starting"* is only ever
+said when another launcher is demonstrably alive — it names that process's pid,
+and points at `stop-kiosk.sh`. A held lock on its own is not evidence: if
+nothing is listening on the port, no console is open and no launcher process
+exists, the lock outlived whatever took it and the launcher takes it over
+rather than deferring to a process that is not there.
+
+Three things follow from that, all of which were bugs:
+
+- `flock` missing is not the same as the lock being held. `! flock -n 9` is
+  also true when the command does not exist, which sent *every* launch —
+  including the first on a fresh machine — down the "still starting" path.
+  Without util-linux the launcher now falls back to a pid check.
+- **Nothing blocks while holding the lock.** `notify()` is `zenity --info`,
+  which waits for someone to click OK. The failure dialog used to be raised
+  while the lock was still held, so a single failed start made every later
+  double-click answer "still starting" — permanently — with the dialog that
+  explained why sitting unread behind the splash. The lock is released, and
+  the half-started pipeline stopped, *before* any dialog is raised.
+- The lock file is never unlinked. Removing it frees nothing — it detaches the
+  name, so the next launcher creates a fresh inode and locks that instead, and
+  two launchers each hold a valid exclusive lock on a different file. The
+  supervisor subshell also explicitly closes the descriptor (`exec 9>&-`), or
+  it keeps the lock alive after the launcher it belongs to has exited.
+
 That notification is deliberately `notify-send`, never `zenity --info`: the
 modal dialog blocks until somebody clicks OK, which would stall the launch
 behind a box nobody is watching.
@@ -141,6 +168,25 @@ kiosk exit endpoint:
 
 normal dashboard viewing over the network still works:
   frame 8, fps 24.7 - readable remotely as intended
+```
+
+## The icon does nothing, or says "still starting"
+
+`~/.astravigil-kiosk.log` is the first place to look — every branch above logs
+which one it took.
+
+| What you see | What it means |
+|---|---|
+| `AstraVigil is still starting (pid N)` | A launcher really is mid-startup. Give it 90 s; if the console never appears, `deploy/stop-kiosk.sh` and click again. |
+| `stale lock, no live launcher - taking it over` | A previous run left the lock behind. Handled; the launch continues. |
+| `flock is not installed - falling back to a pid check` | `sudo apt install -y util-linux` to restore the real lock. |
+| `AstraVigil could not start` + a reason | The pipeline never answered. The dialog carries the command to reproduce it by hand. |
+| Nothing at all in the log | The `.desktop` entry never ran the script — check it is marked trusted, and re-run `install_kiosk.sh`. |
+
+A full stop from anywhere clears every one of these:
+
+```bash
+./deploy/stop-kiosk.sh
 ```
 
 ## Configuring what it launches
@@ -199,6 +245,12 @@ shell watchdog greps for; that the pipeline keeps detecting after an escape;
 that restart exits with code 42; that the kiosk endpoints refuse non-local
 callers; that the page carries the handler; and that all three scripts parse
 under `bash -n` with Unix line endings.
+
+The single-instance guard was then exercised against a stubbed launcher in all
+four of its states — no `flock` on `PATH`, a lock file left behind by a dead
+process, a launcher genuinely mid-startup, and a sensor already answering on
+its port. The first three used to end in "still starting"; they now start, and
+the fourth still reattaches to the running sensor instead of racing it.
 
 What has **not** been verified, because it needs the Pi: whether Chromium on
 your build swallows Ctrl+Shift+Esc, whether the desktop file manager accepts

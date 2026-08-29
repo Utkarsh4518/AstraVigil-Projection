@@ -85,12 +85,17 @@ astravigil_teardown() {
 
     if [ "$keep_launcher" != "keep-launcher" ]; then
         _td_stop_pattern "astravigil-kiosk.sh" "launcher" || true
+        rm -f "$RUN_DIR/launcher.pid"
     fi
 
-    # The lock lives on the launcher's file descriptor, so it is already gone
-    # if the launcher is. Removing the file is for the case where something
-    # left it behind.
-    rm -f "$RUN_DIR/kiosk.lock"
+    # The lock lives on the launcher's file descriptor and is released when
+    # that process exits - which the stop above has just ensured.
+    #
+    # The lock FILE is deliberately left alone. Unlinking it frees nothing: it
+    # only detaches the name, so the next launcher creates a fresh inode and
+    # takes an exclusive lock on that instead. Two launchers would then each
+    # hold a perfectly valid lock on a different file and race two pipelines
+    # onto one camera, which is the single thing the lock exists to prevent.
 
     # Hand the camera back if the pipeline was killed before it could.
     if [ "$forced" -eq 1 ]; then
