@@ -56,6 +56,27 @@ DEFAULT_MODEL = os.environ.get("FEATHERLESS_MODEL",
 # changing this string would be editing the source on the rig.
 USER_AGENT = os.environ.get("FEATHERLESS_USER_AGENT", "AstraVigil/1.0")
 
+# Statuses that mean "ask again", not "you asked wrong". A hosted model at
+# capacity answers 503 with code "capacity_exhausted" and the words "please
+# try again shortly" - it is busy, not misconfigured. Giving up on the first
+# one wastes the whole escalation: the per-object cooldown is 60 s, so by the
+# time we are allowed to ask about that track again the object has usually
+# gone.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRIES = int(os.environ.get("FEATHERLESS_RETRIES", "2"))
+RETRY_BACKOFF_S = float(os.environ.get("FEATHERLESS_RETRY_BACKOFF_S", "2.0"))
+
+# Other models to try when the first is at capacity or does not exist, most
+# preferred first. Empty by default: a wrong guess at a model id is worse than
+# no fallback, and which vision models an account can reach differs per plan.
+#
+#   FEATHERLESS_FALLBACK_MODELS=org/model-a,org/model-b
+#
+# scripts/check_featherless.py --list-models prints what this key can see.
+FALLBACK_MODELS = tuple(
+    m.strip() for m in
+    os.environ.get("FEATHERLESS_FALLBACK_MODELS", "").split(",") if m.strip())
+
 
 def _headers(api_key):
     return {"Content-Type": "application/json",
@@ -190,10 +211,53 @@ class FeatherlessClient:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # Which model actually answered - may be a fallback, and the operator
+        # should be told which model made the call they are reading.
+        self.model_used = model
 
     @property
     def configured(self):
         return bool(self.api_key)
+
+    def _post(self, payload):
+        """One chat completion, with retries and model fallback.
+
+        Retryable statuses are retried on the same model first, because a
+        capacity blip usually clears in seconds and the first model is the one
+        that was chosen. Only once that is exhausted - or the model turns out
+        not to exist - do we move down FALLBACK_MODELS.
+
+        Anything else is raised immediately and unchanged, so the caller's
+        4xx handling still gets to strip the images and try text-only.
+        """
+        wanted = payload["model"]
+        candidates = [wanted] + [m for m in FALLBACK_MODELS if m != wanted]
+        last = None
+
+        for model in candidates:
+            body = dict(payload, model=model)
+            for attempt in range(RETRIES + 1):
+                req = urllib.request.Request(
+                    f"{self.base_url}/chat/completions",
+                    data=json.dumps(body).encode(),
+                    headers=_headers(self.api_key),
+                    method="POST")
+                try:
+                    with urllib.request.urlopen(
+                            req, timeout=self.timeout) as r:
+                        got = json.loads(r.read().decode())
+                    self.model_used = model
+                    return got["choices"][0]["message"]["content"]
+                except urllib.error.HTTPError as exc:
+                    last = exc
+                    if exc.code in RETRY_STATUSES and attempt < RETRIES:
+                        time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+                        continue
+                    break
+            if last is not None and last.code not in RETRY_STATUSES \
+                    and last.code != 404:
+                raise last
+        raise last
 
     def identify(self, features, thermal_crop=None, optical_crop=None):
         if not self.configured:
@@ -215,14 +279,7 @@ class FeatherlessClient:
             "max_tokens": 400,
             "temperature": 0.2,
         }
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers=_headers(self.api_key),
-            method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            body = json.loads(r.read().decode())
-        return body["choices"][0]["message"]["content"]
+        return self._post(payload)
 
     def identify_text_only(self, features):
         """Fallback for models that reject image content."""
@@ -233,14 +290,7 @@ class FeatherlessClient:
             "max_tokens": 400,
             "temperature": 0.2,
         }
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode(),
-            headers=_headers(self.api_key),
-            method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            body = json.loads(r.read().decode())
-        return body["choices"][0]["message"]["content"]
+        return self._post(payload)
 
 
 def _parse(text):

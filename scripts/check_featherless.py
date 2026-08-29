@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from astravigil.llm.featherless import (  # noqa: E402
-    BASE_URL, DEFAULT_MODEL, USER_AGENT, _headers)
+    BASE_URL, DEFAULT_MODEL, RETRY_STATUSES, USER_AGENT, _headers)
 
 ENV_FILE = os.environ.get("ASTRAVIGIL_ENV",
                           os.path.expanduser("~/.astravigil.env"))
@@ -147,8 +147,22 @@ def _explain(status, body, model):
         403: "the key is valid but not permitted to use this model",
         404: f"no such model: {model}",
         429: "rate limited - the key IS valid",
+        503: "the model is busy on the provider's side - nothing is wrong "
+             "with your setup",
     }.get(status, "")
     return f"HTTP {status}  {meaning}\n         {body[:300]}"
+
+
+def vision_models(catalogue, limit=12):
+    """Ids that look like vision-language models, for picking a fallback."""
+    try:
+        rows = json.loads(catalogue).get("data", [])
+    except ValueError:
+        return []
+    ids = [r.get("id", "") for r in rows if isinstance(r, dict)]
+    hits = [i for i in ids
+            if any(t in i.lower() for t in ("-vl", "vl-", "vision", "llava"))]
+    return sorted(hits)[:limit]
 
 
 def live_call(key, model, timeout=30.0):
@@ -166,6 +180,7 @@ def live_call(key, model, timeout=30.0):
     if status != 200:
         return False, "listing models: " + _explain(status, body, model)
     print(f"{OK} the key authenticates (GET /models -> 200)")
+    catalogue = body
 
     payload = {
         "model": model,
@@ -177,7 +192,19 @@ def live_call(key, model, timeout=30.0):
     if status is None:
         return False, f"could not reach {BASE_URL} ({body})"
     if status != 200:
-        return False, f"calling {model}: " + _explain(status, body, model)
+        detail = f"calling {model}: " + _explain(status, body, model)
+        if status in RETRY_STATUSES:
+            # Transient, and upstream. The key, the file and the args are all
+            # confirmed good by this point - reporting a fault here would send
+            # the operator back to re-check settings that are already right.
+            alts = vision_models(catalogue)
+            if alts:
+                detail += ("\n         Other vision models this key can see:"
+                           + "".join(f"\n           {a}" for a in alts))
+                detail += ("\n         Set one as a standby with:"
+                           "\n           FEATHERLESS_FALLBACK_MODELS=<id>")
+            return None, detail
+        return False, detail
     try:
         reply = json.loads(body)["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, ValueError) as exc:
@@ -192,9 +219,28 @@ def main():
                          "works. Costs one tiny request.")
     ap.add_argument("--model", default=None,
                     help=f"model to test with (default {DEFAULT_MODEL})")
+    ap.add_argument("--list-models", action="store_true",
+                    help="print the vision models this key can see, then stop")
     args = ap.parse_args()
 
     fails = warns = 0
+
+    if args.list_models:
+        key = (read_env_file(ENV_FILE)[1].get("FEATHERLESS_API_KEY")
+               or os.environ.get("FEATHERLESS_API_KEY"))
+        if not key:
+            print("no key found")
+            return 1
+        status, body = _request(f"{BASE_URL.rstrip('/')}/models", key)
+        if status != 200:
+            print(_explain(status, body, "-"))
+            return 1
+        found = vision_models(body, limit=60)
+        print(f"\n{len(found)} vision-capable model id(s) visible:\n")
+        for m in found:
+            print(f"  {m}")
+        print()
+        return 0
 
     # ---------------------------------------------------------- the file
     print(f"\nenv file   : {ENV_FILE}")
@@ -266,9 +312,16 @@ def main():
         fails += 1
     else:
         good, detail = live_call(key, model)
-        print(f"\n{OK if good else BAD} {detail}")
-        if not good:
-            fails += 1
+        if good is None:
+            print(f"\n{MEH} {detail}")
+            print(f"\n{OK} your key, its placement and your args are all "
+                  "confirmed good - this is the provider, not you. Retry, or "
+                  "set a fallback model.")
+            warns += 1
+        else:
+            print(f"\n{OK if good else BAD} {detail}")
+            if not good:
+                fails += 1
 
     print()
     if fails:
