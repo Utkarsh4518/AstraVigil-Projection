@@ -1,0 +1,98 @@
+{
+  "site": "cargo apron - north",
+  "zones": [
+    {
+      "name": "apron",
+      "polygon": [
+        [
+          70.0,
+          148.0
+        ],
+        [
+          205.0,
+          148.0
+        ],
+        [
+          215.0,
+          192.0
+        ],
+        [
+          58.0,
+          192.0
+        ]
+      ],
+      "description": "the protected apron surface"
+    },
+    {
+      "name": "service_lane",
+      "polygon": [
+        [
+          0.0,
+          148.0
+        ],
+        [
+          70.0,
+          148.0
+        ],
+        [
+          58.0,
+          192.0
+        ],
+        [
+          0.0,
+          192.0
+        ]
+      ],
+      "description": "ground vehicle service lane"
+    }
+  ],
+  "rules": [
+    {
+      "id": "no-air-over-apron",
+      "zone": "apron",
+      "classes": [
+        "drone",
+        "aircraft"
+      ],
+      "verdict": "prohibited",
+      "severity": 1.0,
+      "reason": "no unmanned aircraft over the apron at any time"
+    },
+    {
+      "id": "birds-expected",
+      "zone": "*",
+      "classes": [
+        "bird"
+      ],
+      "verdict": "permitted",
+      "severity": 0.0,
+      "reason": "birds are common here and are not a concern"
+    },
+    {
+      "id": "vehicles-daylight",
+      "zone": "service_lane",
+      "classes": [
+        "vehicle"
+      ],
+      "verdict": "permitted",
+      "severity": 0.4,
+      "reason": "ground vehicles use the service lane in daylight",
+      "hours": [
+        6,
+        22
+      ]
+    },
+    {
+      "id": "no-loiter-apron",
+      "zone": "apron",
+      "classes": [
+        "*"
+      ],
+      "verdict": "restricted",
+      "severity": 0.85,
+      "reason": "nothing may remain stationary on the apron over two minutes",
+      "max_dwell_s": 120
+    }
+  ],
+  "source_text": "This is the northern apron of a cargo airport. The apron itself is the\nprotected area. A service lane runs along its western edge.\n\nNo unmanned aircraft of any kind are permitted over the apron at any time.\nGround vehicles are expected in the service lane between 06:00 and 22:00.\nBirds are common here and are not a concern.\nNothing should remain stationary on the apron for more than two minutes.\n"
+}

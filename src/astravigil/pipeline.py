@@ -93,9 +93,13 @@ class Pipeline:
     def __init__(self, source, H=None, threshold_c=1.5, site=None,
                  alerts=None, fps=25.0, clock="wall", learn=True,
                  cross_cue=True, optical_every_n=3, escalator=None,
-                 escalate_at=0.75):
+                 escalate_at=0.75, policy=None):
         self.source = source
         self.H = H
+        # Authored site policy - what is ALLOWED here, as opposed to what the
+        # baseline has learned is normal here. Optional: with no policy the
+        # system behaves exactly as before, judging on statistics alone.
+        self.policy = policy
         self.detector = ThermalDetector(threshold_c=threshold_c)
         # Optical frames carry six times the pixels of thermal ones and far
         # more clutter, so this runs at a fraction of the rate. Thermal keeps
@@ -226,9 +230,12 @@ class Pipeline:
         # --- learn the site, then judge against what has been learned.
         # Order matters: observe() first so the z-map the scorer reads is
         # this frame's, not the previous one's.
+        # Always observe: a frozen model still has to be READ every frame, or
+        # its persistence counters never move and a settled intruder is
+        # invisible. `learn` gates only the update inside.
+        self.site.observe(res.thermal_c, tracks,
+                          exclude_ids=self._alerting, learn=self.learn)
         if self.learn:
-            self.site.observe(res.thermal_c, tracks,
-                              exclude_ids=self._alerting)
             for det in detections:
                 self.site.note_hotspot(det.hotspot_c)
         self.dwell.update(tracks, now)
@@ -257,7 +264,14 @@ class Pipeline:
                     and tr is not None and tr.hits >= 4 and interesting):
                 optical_ev = verify_optical(optical, self.H, det.box)
                 evidence[det.track_id] = optical_ev
-            a = assess_track(det, tr, novelty, dwell_s, optical_ev)
+            judgement = None
+            if self.policy is not None:
+                judgement = self.policy.judge(
+                    det.label, det.centroid, dwell_s=dwell_s,
+                    speed_px=(tr.speed_px if tr is not None else 0.0),
+                    when=now)
+            a = assess_track(det, tr, novelty, dwell_s, optical_ev,
+                             judgement=judgement)
             self._maybe_escalate(a, det, tr, res, optical_ev)
             assessments.append(a)
 

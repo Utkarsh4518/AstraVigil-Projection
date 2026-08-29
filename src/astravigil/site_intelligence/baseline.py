@@ -242,8 +242,20 @@ class SiteBaseline:
         return cv2.resize(np.asarray(celsius, np.float32),
                           (self.gw, self.gh), interpolation=cv2.INTER_AREA)
 
-    def observe(self, celsius, tracks=None, exclude_ids=()):
-        """Feed one calibrated frame plus the live tracks. Updates the model."""
+    def observe(self, celsius, tracks=None, exclude_ids=(), learn=True):
+        """Feed one calibrated frame plus the live tracks.
+
+        Scoring and updating are separate jobs and `learn` only switches off
+        the second. Everything above `_update_reference` - the deviation map,
+        the z-scores, the persistence counters - is how the model is READ, and
+        it has to run every frame regardless.
+
+        Skipping the whole call when frozen is the obvious shortcut and it is
+        wrong: it leaves `persist`, `_dev` and `_z` at whatever they were, so
+        `static_anomalies()` reports nothing and a settled intruder becomes
+        invisible. A frozen model is meant to be the strict case, not a blind
+        one.
+        """
         cells = self._cells(celsius)
         # Median of the grid, not of the full frame: 768 values instead of
         # 49k for the same robustness, and this runs every frame.
@@ -268,6 +280,11 @@ class SiteBaseline:
 
         self.persist = np.where(anom, self.persist + 1,
                                 np.maximum(self.persist - PERSIST_DECAY, 0))
+
+        # Everything above this line is reading the model. Below is updating
+        # it, and that is the only part `learn` controls.
+        if not learn:
+            return self
 
         self._update_reference(rel, ~anom)
 

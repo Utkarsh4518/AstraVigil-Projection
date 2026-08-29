@@ -147,10 +147,26 @@ def main():
     p.add_argument("--thermal-dir", default="data/raw/thermal")
     p.add_argument("--optical", default=None,
                    help="webcam index or video path for replay/hardware")
+    p.add_argument("--policy", default=None,
+                   help="site policy JSON from scripts/compile_policy.py - "
+                        "what is ALLOWED here, as opposed to what the "
+                        "baseline learns is normal here")
     p.add_argument("--swap-rb", action="store_true",
                    help="flip red/blue on the optical feed, if colours look "
                         "inverted (skin appearing blue)")
     args = p.parse_args()
+
+    policy = None
+    if args.policy:
+        from astravigil.policy import SitePolicy, validate
+        policy = SitePolicy.load(args.policy)
+        problems = validate(policy)
+        print(f"policy           : {args.policy} "
+              f"({len(policy.rules)} rules, {len(policy.zones) - 1} zones)")
+        for pr in problems:
+            print(f"  ! {pr}")
+    else:
+        print("policy           : none - judging on learned statistics alone")
 
     source = build_source(args)
     H = resolve_homography(args, source)
@@ -170,7 +186,7 @@ def main():
     else:
         print("featherless      : off (local classification only)")
 
-    pipeline = Pipeline(source, H=H, threshold_c=args.threshold, site=site,
+    pipeline = Pipeline(source, H=H, threshold_c=args.threshold, policy=policy, site=site,
                         alerts=alerts, fps=args.fps,
                         learn=not args.no_learn, escalator=escalator,
                         escalate_at=args.escalate_at)

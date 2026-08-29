@@ -116,6 +116,11 @@ LANDING_XY = (700.0, 645.0)
 APPROACH_XY = (540.0, 340.0)
 MOTOR_COOL_TAU_S = 25.0
 BODY_COOL_TAU_S = 70.0
+# How long a "resident" airframe is treated as having already sat there. Ten
+# body time constants puts every exponential below 0.005 % of its starting
+# excess, so it is cold-soaked to well under sensor noise - genuinely the
+# hard case, with no residual heat left to make it easy.
+PRE_COOLED_S = 10.0 * BODY_COOL_TAU_S
 
 
 class Intruder(Target):
@@ -152,8 +157,15 @@ class Intruder(Target):
             self.x, self.y = LANDING_XY
             # Already been there for hours: fully cold-soaked, which is the
             # hardest version of the problem.
-            self.body_c = T_GROUND + 4.5
-            self.motor_c = self.core_c = self.body_c
+            #
+            # This has to be expressed as a landing that happened long ago,
+            # not as temperatures assigned here. step() recomputes all three
+            # from the cooling curve on every frame, so values set at
+            # construction are overwritten before the first frame is ever
+            # rendered - which silently turned this into "lands hot, cools
+            # over 30 s" and made the hardest scenario the easy one.
+            self.landed_at = -PRE_COOLED_S
+            self.t = 0.0
 
     def step(self, dt):
         self.t += dt

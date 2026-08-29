@@ -26,6 +26,13 @@ of them will be unclassified. A confidently-classified bird carries none.
 """
 from .crosscue import fuse_identity
 
+# How much of the site-novelty signal survives when policy says this activity
+# is expected here. Not zero, deliberately: policy states that a CLASS belongs
+# in a PLACE, not that any particular object is harmless. Leaving a quarter of
+# the statistical signal in means a permitted vehicle behaving like nothing
+# ever seen in that lane can still climb back to an alert on its own.
+SITE_SUPPRESSION = 0.25
+
 # Identity risk by label. Bird is zero on purpose: the site channel is what
 # catches a bird behaving impossibly, and double-counting it here would just
 # make every gull a suspect.
@@ -45,14 +52,14 @@ class Assessment:
     """One object, one verdict, and the reasons behind it."""
 
     __slots__ = ("key", "kind", "track_id", "label", "confidence", "threat",
-                 "level", "identity_risk", "site_risk", "novelty", "dwell_s",
+                 "level", "identity_risk", "site_risk", "policy", "novelty", "dwell_s",
                  "reasons", "box", "centroid", "optical", "thermal_check",
                  "sensors")
 
     def __init__(self, key, kind, threat, level, identity_risk, site_risk,
                  reasons, box, centroid, track_id=None, label="unknown",
                  confidence=0.0, novelty=None, dwell_s=0.0, optical=None,
-                 thermal_check=None, sensors="thermal"):
+                 thermal_check=None, sensors="thermal", policy=None):
         self.key = key
         self.kind = kind                # "track" | "static"
         self.track_id = track_id
@@ -61,6 +68,7 @@ class Assessment:
         self.threat = threat
         self.level = level
         self.identity_risk = identity_risk
+        self.policy = policy
         self.site_risk = site_risk
         self.novelty = novelty
         self.dwell_s = dwell_s
@@ -85,6 +93,8 @@ class Assessment:
              "box": [int(v) for v in self.box]}
         if self.novelty is not None:
             d["novelty"] = self.novelty.as_dict()
+        if self.policy is not None:
+            d["policy"] = self.policy.as_dict()
         if self.optical is not None:
             d["optical"] = self.optical.as_dict()
         if self.thermal_check is not None:
@@ -108,12 +118,26 @@ def identity_risk(label, confidence):
     return UNKNOWN_FLOOR
 
 
-def assess_track(det, track, novelty, dwell_s=0.0, optical=None):
+def assess_track(det, track, novelty, dwell_s=0.0, optical=None,
+                 judgement=None):
     """Verdict on a tracked mover, with optical's shape check folded in.
 
     The identity half may now come from two sensors; the site half never
     does. They still meet at the same noisy-OR, so a cross-confirmed drone
     and a behaviourally impossible unknown both still reach the operator.
+
+    `judgement` adds a third independent term: what a human said is ALLOWED
+    here, from site policy. It joins the same noisy-OR because it is evidence
+    of the same kind - sufficient on its own, never able to veto the others.
+    A policy that could cancel a detection would be a way to switch the sensor
+    off by editing a config file.
+
+    The one thing policy may do downward is suppress SITE novelty, and only
+    for activity explicitly stated as expected. A ground vehicle in its lane
+    is thermally novel every time it passes; alarming every time is how an
+    operator learns to ignore the system. Note this suppresses the statistical
+    surprise, not the identity term - a drone in a lane where vehicles are
+    permitted still carries its full identity risk.
     """
     label, confidence = det.label, det.confidence
     note = None
@@ -122,7 +146,13 @@ def assess_track(det, track, novelty, dwell_s=0.0, optical=None):
 
     ident = identity_risk(label, confidence)
     site = novelty.overall if novelty is not None else 0.0
-    threat = 1.0 - (1.0 - ident) * (1.0 - site)
+    policy_risk = 0.0
+
+    if judgement is not None:
+        policy_risk = judgement.risk
+        if judgement.suppresses_novelty:
+            site *= SITE_SUPPRESSION
+    threat = 1.0 - (1.0 - ident) * (1.0 - site) * (1.0 - policy_risk)
 
     reasons = []
     if label == "drone" and confidence > 0.5:
@@ -131,8 +161,14 @@ def assess_track(det, track, novelty, dwell_s=0.0, optical=None):
         reasons.append("unclassified mover")
     if note:
         reasons.append(note)
+    # Policy reasons lead: "no aircraft over the apron" is what an operator
+    # needs first, ahead of the statistics that also happened to fire.
+    if judgement is not None and judgement.verdict == "prohibited":
+        reasons = judgement.reasons + reasons
     if novelty is not None:
         reasons.extend(novelty.reasons)
+    if judgement is not None and judgement.verdict == "permitted":
+        reasons.extend(judgement.reasons)
 
     sensors = "thermal+optical" if (optical is not None
                                     and optical.usable) else "thermal"
@@ -141,7 +177,8 @@ def assess_track(det, track, novelty, dwell_s=0.0, optical=None):
         level=_level(threat), identity_risk=ident, site_risk=site,
         reasons=reasons, box=det.box, centroid=det.centroid,
         track_id=det.track_id, label=label, confidence=confidence,
-        novelty=novelty, dwell_s=dwell_s, optical=optical, sensors=sensors)
+        novelty=novelty, dwell_s=dwell_s, optical=optical, sensors=sensors,
+        policy=judgement)
 
 
 def assess_optical_only(odet, thermal_check, key, dwell_s=0.0):
