@@ -232,6 +232,17 @@ well. The key alone does not enable it: sending cropped imagery of the
 protected site to a third party should take a deliberate second step, and
 nothing in the system depends on it.
 
+To check all of that at once:
+
+```bash
+python3 scripts/check_featherless.py          # placement and shape
+python3 scripts/check_featherless.py --live   # spend one call, prove it works
+```
+
+The dashboard's `featherless: on` line is not proof the key is good -
+`FeatherlessClient.configured` is `bool(api_key)` and nothing more. Only
+`--live` distinguishes a working key from a typo.
+
 ## Starting on boot instead
 
 If the unit should come up watching without anyone logging in, a systemd user
