@@ -14,6 +14,9 @@ either proves the persistent baseline works or proves it does not.
     python scripts/selftest.py
 """
 import os
+import shutil
+import subprocess
+import tempfile
 import sys
 
 import numpy as np
@@ -118,6 +121,47 @@ def main():
         check(f"{name} view renders and encodes",
               img is not None and jpg is not None and len(jpg) > 500,
               f"{img.shape[1]}x{img.shape[0]}, {len(jpg) // 1024} KB")
+
+    section("5b. DASHBOARD PAGE")
+    # A syntax error anywhere in the page's script block stops the WHOLE block
+    # parsing, so nothing runs: no polling, no buttons, no escape sequence.
+    # The page still loads and still shows the four camera streams, because
+    # those are plain <img> tags the browser fetches on its own - so it looks
+    # alive while every control on it is dead. That failure has shipped once
+    # already; it is cheap to make impossible.
+    from astravigil.dashboard.page import PAGE
+    script = PAGE[PAGE.index("<script>") + 8:PAGE.rindex("</script>")]
+
+    check("page markup has balanced script tags",
+          PAGE.count("<script>") == PAGE.count("</script>") == 1)
+
+    # Every element the script reaches for by id must exist in the markup, or
+    # the first call returns null and everything after it in that function
+    # stops - which is how one renamed div silently kills the poll loop.
+    import re
+    wanted = set(re.findall(r'getElementById\("([^"]+)"\)', script))
+    present = set(re.findall(r'id="([^"]+)"', PAGE))
+    missing = sorted(wanted - present)
+    check("every getElementById target exists in the markup",
+          not missing, f"{len(wanted)} looked up" +
+          (f", MISSING: {', '.join(missing)}" if missing else ""))
+
+    node = shutil.which("node")
+    if node:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(script)
+            tmp = fh.name
+        proc = subprocess.run([node, "--check", tmp],
+                              capture_output=True, text=True)
+        os.unlink(tmp)
+        check("dashboard javascript parses",
+              proc.returncode == 0,
+              (proc.stderr.strip().splitlines() or ["clean"])[0][:120])
+    else:
+        # Not a failure: node is a convenience here, not a dependency. The
+        # id check above still runs and catches the commoner mistake.
+        print("  [skip] node not installed - javascript not syntax-checked")
 
     section("6. SITE INTELLIGENCE")
     # Learn a clean scene first. Everything after this depends on the model

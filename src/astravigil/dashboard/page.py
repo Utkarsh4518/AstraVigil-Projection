@@ -219,9 +219,13 @@ PAGE = r"""<!doctype html>
     <button class="devonly" onclick="saveSite()" title="Write the learned site model to disk">save site model</button>
     <span id="kioskbar">
       <button onclick="kioskRestart()" title="Restart the console">restart</button>
-      <button id="closebtn" class="danger" onclick="kioskClose()"
-              title="Stop AstraVigil and close the console">close console</button>
     </span>
+    <!-- Deliberately outside #kioskbar, so it shows in every mode. Closing a
+         browser tab does not stop the pipeline: the sensor keeps running, the
+         port stays bound and the camera stays claimed. Without a visible stop
+         there is nothing on the page that actually ends a session. -->
+    <button id="closebtn" class="danger" onclick="kioskClose()"
+            title="Stop AstraVigil - releases the camera and frees the port">stop</button>
   </div>
 </header>
 
@@ -333,11 +337,11 @@ function kioskClose() {
     closeArmed = now;
     b.classList.add("armed");
     b.textContent = "click again to stop";
-    escHint("Click <b>again</b> to stop AstraVigil and close the console.", 4000);
+    escHint("Click <b>again</b> to stop AstraVigil.", 4000);
     setTimeout(() => {
       if (Date.now() - closeArmed >= 4000) {
         b.classList.remove("armed");
-        b.textContent = "close console";
+        b.textContent = "stop";
       }
     }, 4200);
     return;
@@ -406,10 +410,9 @@ function alertCard(a) {
   // Everything an operator needs at a glance is on line one; the evidence is
   // on line two, truncated, with the whole of it on hover.
   return `<div class="alert alert-${a.level} kind-${a.kind}"
-       title="${esc(who + " — since " + a.opened_hms + ", " + dur +
+       title="${esc(who + " - since " + a.opened_hms + ", " + dur +
                     ", threat " + fmt(a.threat) + " (peak " +
-                    fmt(a.peak_threat) + ")
-" + why)}">
+                    fmt(a.peak_threat) + ") - " + why)}">
     <div class="ln1">
       <span class="badge b-${a.level}">${a.level}</span>
       <b>${who}</b>

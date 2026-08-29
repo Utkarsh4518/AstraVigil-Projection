@@ -31,6 +31,8 @@ import os
 import threading
 import time
 
+import signal
+
 from flask import Flask, Response, jsonify, render_template_string, request
 
 from . import render
@@ -323,17 +325,52 @@ def create_app(pipeline, state, site_path=None):
     def kiosk_status():
         if not _from_this_machine():
             return jsonify({"error": "kiosk control is local-only"}), 403
+        # Only the launcher polls this, so it doubles as proof that a
+        # supervisor is alive and will act on exit_requested.
+        kiosk["last_poll"] = time.time()
         return jsonify(kiosk)
+
+    def _supervised(within_s=6.0):
+        last = kiosk.get("last_poll", 0.0)
+        return last and (time.time() - last) < within_s
+
+    def _self_stop():
+        # Raise the interrupt the shutdown path already handles, rather than
+        # exiting outright: that is what runs source.close() and hands the
+        # thermal camera back. Killing the process instead leaves uvcvideo
+        # detached and the next run fails on hardware that is fine.
+        time.sleep(1.0)
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+        except (AttributeError, OSError, ValueError):
+            # Windows has no usable SIGINT to self. Dev only - there is no
+            # thermal camera on this path, so nothing is left claimed.
+            os._exit(0)
 
     @app.route("/api/kiosk/exit", methods=["POST"])
     def kiosk_exit():
-        """Escape sequence completed. Close the browser, keep detecting."""
+        """Stop request from the page - the close button or the key sequence.
+
+        Two ways this gets honoured, and which one applies depends on whether
+        anything is supervising:
+
+          LAUNCHED FROM THE ICON  the launcher is polling /api/kiosk/status,
+            sees the flag, and runs the full teardown - browser, pipeline,
+            port, lock, camera. Setting the flag is all that is needed.
+
+          RUN FROM A TERMMINAL  nothing polls, so the flag alone would do
+            nothing at all and the button would look broken. Stop ourselves
+            instead.
+        """
         if not _from_this_machine():
             return jsonify({"error": "kiosk control is local-only"}), 403
         kiosk["exit_requested"] = True
-        print("kiosk: escape sequence accepted - releasing the display "
-              "(the sensor keeps running)")
-        return jsonify({"exiting": True})
+        if _supervised():
+            print("stop requested - the launcher will tear everything down")
+            return jsonify({"exiting": True, "by": "launcher"})
+        print("stop requested - no launcher supervising, stopping this process")
+        threading.Thread(target=_self_stop, daemon=True).start()
+        return jsonify({"exiting": True, "by": "self"})
 
     @app.route("/api/kiosk/ack", methods=["POST"])
     def kiosk_ack():
