@@ -42,6 +42,14 @@ from ..calibration import homography
 # turned, along with the boxes drawn on them.
 THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "3")) % 4
 
+# The same idea for the two optical-space panes. 2 on this rig: the Pi camera
+# is mounted inverted, so the scene needs a half turn to come up the right way.
+#
+# Also a VIEW setting. The homography is fitted in the optical camera's own
+# coordinates and detections are mapped into them, so nothing upstream of the
+# draw call knows or cares which way up the pane is shown.
+OPTICAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_OPTICAL_ROT", "2")) % 4
+
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue
 COL_UNKNOWN = (150, 150, 160)
@@ -163,32 +171,52 @@ def thermal_view(result, scale=2):
 
 def optical_view(result, H):
     img = result.optical.copy()
+    fh, fw = img.shape[:2]          # before rotation - _rot_box needs these
     if H is None:
+        img = _rot_image(img, OPTICAL_VIEW_ROT)
         _banner(img, "OPTICAL - not calibrated")
         return img
 
     seen = assessment_map(result)
-    # Where the optical detector is allowed to look. Outside this box the
-    # thermal camera cannot verify anything, and on a fixed mount there is no
-    # way to slew - so an operator should be able to see the boundary.
+
+    # Pass one: rectangles, drawn in the camera's own coordinates.
     roi = getattr(result, "optical_roi", None)
     if roi is not None:
         rx, ry, rw, rh = roi
         cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), (90, 90, 100), 1)
 
-    # Optical contacts nothing thermal claimed. These are the reverse cue.
-    for od in result.optical_detections:
-        if od.thermal_match is not None:
-            continue
+    optical_only = [od for od in result.optical_detections
+                    if od.thermal_match is None]
+    for od in optical_only:
         x, y, w, h = od.box
         cv2.rectangle(img, (x, y), (x + w, y + h), COL_OPTICAL, 2)
-        _tag(img, "OPTICAL ONLY", x, y - 6, COL_OPTICAL, 0.45)
 
+    mapped = []
     for det in result.detections:
-        x, y, w, h = homography.map_box(H, det.box)
+        box = homography.map_box(H, det.box)
+        x, y, w, h = box
         a = seen.get(det.track_id)
         col = colour_for_level(a.level if a else "nominal")
         cv2.rectangle(img, (x, y), (x + w, y + h), col, 2)
+        mapped.append((box, det, a, col))
+
+    statics = []
+    for an in result.static_anomalies:
+        box = homography.map_box(H, an.box)
+        x, y, w, h = box
+        cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 2)
+        statics.append((box, an))
+
+    # Turn picture and boxes together, then label in rotated coordinates so
+    # the writing stays the right way up.
+    img = _rot_image(img, OPTICAL_VIEW_ROT)
+
+    for od in optical_only:
+        rx, ry, _, _ = _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)
+        _tag(img, "OPTICAL ONLY", rx, ry - 6, COL_OPTICAL, 0.45)
+
+    for box, det, a, col in mapped:
+        rx, ry, _, _ = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
         tag = f"#{det.track_id} {det.label} {det.confidence:.2f}"
         if a is not None:
             tag += f"  threat {a.threat:.2f}"
@@ -197,11 +225,12 @@ def optical_view(result, H):
             tag += f"  | optical: {ev.label} {ev.confidence:.2f}"
         elif ev is not None:
             tag += "  | optical: no shape"
-        _tag(img, tag, x, y - 6, col, 0.5)
-    for an in result.static_anomalies:
-        x, y, w, h = homography.map_box(H, an.box)
-        cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 2)
-        _tag(img, f"SETTLED OBJECT {an.dwell_s:.0f}s", x, y - 6, COL_SETTLED, 0.5)
+        _tag(img, tag, rx, ry - 6, col, 0.5)
+
+    for box, an in statics:
+        rx, ry, _, _ = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
+        _tag(img, f"SETTLED OBJECT {an.dwell_s:.0f}s", rx, ry - 6,
+             COL_SETTLED, 0.5)
 
     c = result.cross or {}
     _banner(img, f"OPTICAL - {c.get('paired_with_thermal', 0)} paired with "
@@ -215,6 +244,7 @@ def overlay_view(result, H, alpha=0.45):
     """Thermal warped into optical space. The frame-matching sanity check."""
     img = result.optical.copy()
     if H is None:
+        img = _rot_image(img, OPTICAL_VIEW_ROT)
         _banner(img, "OVERLAY - calibrate to enable")
         return img
 
@@ -229,10 +259,19 @@ def overlay_view(result, H, alpha=0.45):
     img = np.where(m, cv2.addWeighted(img, 1 - alpha, warped, alpha, 0), img)
 
     h, w = result.thermal_c.shape
-    corners = homography.map_points(
-        H, [[0, 0], [w, 0], [w, h], [0, h]]).astype(np.int32)
+    corners = homography.map_points(H, [[0, 0], [w, 0], [w, h], [0, h]])
+
+    fh, fw = img.shape[:2]          # before rotation
+    img = _rot_image(img, OPTICAL_VIEW_ROT)
+    corners = np.array(
+        [_rot_point(int(px), int(py), fw, fh, OPTICAL_VIEW_ROT)
+         for px, py in corners], np.int32)
+
     cv2.polylines(img, [corners], True, (0, 235, 235), 2)
-    cv2.putText(img, "thermal FOV", tuple(corners[0] + np.array([4, 18])),
+    # Label the corner that is now top-left, or the caption ends up in the
+    # middle of the frame after an odd turn.
+    tl = corners[np.argmin(corners.sum(axis=1))]
+    cv2.putText(img, "thermal FOV", tuple(tl + np.array([4, 18])),
                 FONT, 0.45, (0, 235, 235), 1, cv2.LINE_AA)
     _banner(img, f"OVERLAY - thermal warped into optical  alpha={alpha:.2f}")
     return img
