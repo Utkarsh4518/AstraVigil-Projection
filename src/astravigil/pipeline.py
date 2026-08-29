@@ -41,6 +41,7 @@ from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
 from .llm import Escalator
 from .site_intelligence import DwellMonitor, SiteBaseline
+from .site_intelligence.optical_baseline import OpticalBaseline
 from .site_intelligence.baseline import MIN_LEARNED_FRAMES
 from .tracking.tracker import Tracker
 
@@ -49,7 +50,7 @@ class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
                  "healthy", "assessments", "alerts", "static_anomalies",
-                 "site_stats", "novelty", "optical_detections",
+                 "site_stats", "optical_site_stats", "novelty", "optical_detections",
                  "optical_evidence", "cross", "optical_roi", "learning",
                  "identifications", "escalation")
 
@@ -131,6 +132,11 @@ class Pipeline:
         self.clock = clock
         self.learn = learn
         self.site = site if site is not None else SiteBaseline(fps=fps)
+        # The other camera's model of the same place. Built lazily on the
+        # first optical frame, because its grid has to match that frame's
+        # size and nothing here knows it until one arrives.
+        self.optical_site = None
+        self._optical_tick = 0
         self.dwell = DwellMonitor()
         self.alerts = alerts if alerts is not None else AlertManager()
         self.frame_index = 0
@@ -281,6 +287,18 @@ class Pipeline:
         # Always observe: a frozen model still has to be READ every frame, or
         # its persistence counters never move and a settled intruder is
         # invisible. `learn` gates only the update inside.
+        # The optical camera learning the same place. Run at the optical
+        # detector's reduced rate: a Sobel over 640x480 every frame is real
+        # work on a Pi, and a scene does not change meaningfully in 120 ms.
+        optical_z = None
+        if optical is not None:
+            if self.optical_site is None:
+                self.optical_site = OpticalBaseline(shape=optical.shape[:2],
+                                                    fps=self.fps)
+            self._optical_tick += 1
+            if self._optical_tick % max(1, self.optical.every_n) == 0:
+                optical_z = self.optical_site.observe(optical, learn=self.learn)
+
         self.site.observe(res.thermal_c, tracks,
                           exclude_ids=self._alerting, learn=self.learn)
         if self.learn:
@@ -293,7 +311,20 @@ class Pipeline:
         for det in detections:
             tr = tracks.get(det.track_id)
             dwell_s = self.dwell.dwell_s(det.track_id, now)
-            novelty = self.site.score(det, tr, dwell_s)
+
+            # Ask the optical camera whether this patch of the scene looks
+            # the way it normally does. Needs the homography to know where to
+            # look, so on an uncalibrated rig this stays None - which Novelty
+            # reads as "no opinion" rather than as a vote of zero.
+            opt_nov, opt_why = None, ()
+            if (self.optical_site is not None and self.H is not None
+                    and not self.optical_site.learning):
+                opt_nov, opt_why = self.optical_site.score(
+                    homography.map_box(self.H, det.box))
+
+            novelty = self.site.score(det, tr, dwell_s,
+                                      optical_novelty=opt_nov,
+                                      optical_reasons=opt_why)
 
             # THERMAL -> OPTICAL. Only asked for objects with enough track
             # history to be worth a second opinion; asking every frame about
@@ -362,6 +393,8 @@ class Pipeline:
         res.assessments = assessments
         res.static_anomalies = statics
         res.site_stats = self.site.stats()
+        res.optical_site_stats = (self.optical_site.stats()
+                                  if self.optical_site is not None else None)
         res.learning = self.learning_status()
         res.identifications = {
             a.key: self.escalator.result_for(a.key).as_dict()

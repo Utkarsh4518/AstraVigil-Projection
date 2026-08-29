@@ -131,17 +131,24 @@ class _Running:
 class Novelty:
     """Why - and how strongly - the site model thinks something is out of place."""
 
-    __slots__ = ("position", "appearance", "feature", "dwell", "overall",
-                 "reasons")
+    __slots__ = ("position", "appearance", "feature", "dwell", "optical",
+                 "overall", "reasons")
 
     def __init__(self, position=0.0, appearance=0.0, feature=0.0, dwell=0.0,
-                 reasons=None):
+                 reasons=None, optical=None):
         self.position = position
         self.appearance = appearance
         self.feature = feature
         self.dwell = dwell
+        # None means the optical baseline had no opinion - it is still
+        # learning, or the detection does not map into its frame. That is not
+        # the same as a vote of zero, which would dilute the mean below and
+        # quietly weaken every verdict on a rig with one camera.
+        self.optical = optical
         self.reasons = reasons or []
         parts = (position, appearance, feature, dwell)
+        if optical is not None:
+            parts = parts + (optical,)
         # Dominated by the strongest single cue, with a small bonus when
         # several agree. A plain noisy-OR over four mild signals reads as
         # near-certainty, which is how an anomaly detector earns a reputation
@@ -386,8 +393,16 @@ class SiteBaseline:
         gy = np.clip(p[:, 1].astype(np.int32) // self.cell_px, 0, self.gh - 1)
         return float(self._count[gy, gx].mean())
 
-    def score(self, det, track, dwell_s=0.0):
-        """How out of place is this object, and why."""
+    def score(self, det, track, dwell_s=0.0, optical_novelty=None,
+              optical_reasons=()):
+        """How out of place is this object, and why.
+
+        `optical_novelty` is the other camera's answer to the same question,
+        from OpticalBaseline. It joins as a fifth channel rather than being
+        averaged in afterwards, so the "strongest cue dominates" rule covers
+        it too: a scene the optical camera finds badly wrong should be able
+        to carry a verdict on its own, exactly as a thermal cue can.
+        """
         reasons = []
         gy, gx = self._cell_of(det.centroid)
 
@@ -444,7 +459,10 @@ class SiteBaseline:
             if dwell > 0.3:
                 reasons.append(f"stationary for {dwell_s:.0f} s")
 
-        return Novelty(position, appearance, feature, dwell, reasons)
+        if optical_reasons:
+            reasons.extend(optical_reasons)
+        return Novelty(position, appearance, feature, dwell, reasons,
+                       optical=optical_novelty)
 
     # ---------------------------------------------------- static anomalies
     def static_anomalies(self):
