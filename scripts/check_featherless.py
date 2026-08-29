@@ -130,6 +130,13 @@ def _request(url, key, payload=None, timeout=30.0):
         return exc.code, exc.read().decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         return None, str(exc.reason)
+    except OSError as exc:
+        # A socket timeout while waiting for the response line arrives as a
+        # bare TimeoutError, NOT wrapped in URLError - urllib only wraps what
+        # happens while opening the connection. Catching URLError alone let it
+        # escape and killed the probe on the first model that was slow to
+        # start, which is exactly the model a probe exists to skip past.
+        return None, str(exc) or type(exc).__name__
 
 
 def _explain(status, body, model):
@@ -269,6 +276,14 @@ def main():
                     help="try the top N vision models (default 6) and report "
                          "which actually answer right now, then stop. Costs "
                          "one tiny call each")
+    ap.add_argument("--timeout", type=float, default=20.0,
+                    help="seconds to wait per model while probing "
+                         "(default 20). A model that has to be loaded onto a "
+                         "GPU first can sit far longer than it is worth "
+                         "waiting for when the point is to find a free one")
+    ap.add_argument("--need", type=int, default=3,
+                    help="stop probing once this many models answer "
+                         "(default 3: one to use and two standbys)")
     args = ap.parse_args()
 
     fails = warns = 0
@@ -291,21 +306,36 @@ def main():
         if wanted not in cands:
             cands.insert(0, wanted)
 
-        print(f"\ntrying {len(cands)} model(s) - one small call each\n")
+        print(f"\ntrying up to {len(cands)} model(s), {args.timeout:.0f}s "
+              f"each, stopping at {args.need} that answer")
+        print("(Ctrl+C to stop early and keep what has been found)\n")
         working = []
-        for m in cands:
-            st, bd = _request(f"{base}/chat/completions", key, {
-                "model": m,
-                "messages": [{"role": "user", "content": "say ok"}],
-                "max_tokens": 5, "temperature": 0.0})
-            if st == 200:
-                working.append(m)
-                print(f"{OK} {m}")
-            elif st in RETRY_STATUSES:
-                print(f"{MEH} {m}  busy ({st})")
-            else:
-                short = (bd or "")[:90].replace("\n", " ")
-                print(f"{BAD} {m}  HTTP {st}  {short}")
+        try:
+            for m in cands:
+                # The name goes out BEFORE the call, unbuffered. A probe that
+                # prints only results looks hung while it waits, and the one
+                # thing the operator needs to know during the wait is which
+                # model is holding things up.
+                sys.stdout.write(f"  {m} ... ")
+                sys.stdout.flush()
+                st, bd = _request(f"{base}/chat/completions", key, {
+                    "model": m,
+                    "messages": [{"role": "user", "content": "say ok"}],
+                    "max_tokens": 5, "temperature": 0.0},
+                    timeout=args.timeout)
+                if st == 200:
+                    working.append(m)
+                    print("FREE")
+                elif st is None:
+                    print(f"no answer in {args.timeout:.0f}s - skipping")
+                elif st in RETRY_STATUSES:
+                    print(f"busy ({st})")
+                else:
+                    print(f"HTTP {st}  {(bd or '')[:70]}")
+                if len(working) >= args.need:
+                    break
+        except KeyboardInterrupt:
+            print("\n  stopped\n")
 
         print()
         if not working:

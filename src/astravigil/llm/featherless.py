@@ -254,8 +254,19 @@ class FeatherlessClient:
                         time.sleep(RETRY_BACKOFF_S * (attempt + 1))
                         continue
                     break
-            if last is not None and last.code not in RETRY_STATUSES \
-                    and last.code != 404:
+                except OSError as exc:
+                    # Timeouts and dropped connections. A hosted model being
+                    # loaded onto a GPU can hold the socket open past our
+                    # deadline, which is the same "ask again shortly" as a
+                    # 503 and deserves the same retry rather than a failure.
+                    last = exc
+                    if attempt < RETRIES:
+                        time.sleep(RETRY_BACKOFF_S * (attempt + 1))
+                        continue
+                    break
+            code = getattr(last, "code", None)
+            if code is not None and code not in RETRY_STATUSES \
+                    and code != 404:
                 raise last
         raise last
 
