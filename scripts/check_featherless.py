@@ -69,7 +69,7 @@ def read_env_file(path):
                 line = line[7:].lstrip()
             if "=" not in line:
                 found.setdefault("_problems", []).append(
-                    f"line {n}: no '=' - the shell would not set anything here")
+                    f"line {n}: no '=' - the shell would set nothing here")
                 continue
             k, v = line.split("=", 1)
             k = k.strip()
@@ -81,7 +81,7 @@ def read_env_file(path):
 
 
 def check_key_string(key):
-    """Shape problems that produce a confusing 401 rather than an obvious one."""
+    """Shapes that give a confusing 401 rather than an obvious one."""
     problems = []
     if key != key.strip():
         problems.append("has leading or trailing whitespace")
@@ -153,16 +153,59 @@ def _explain(status, body, model):
     return f"HTTP {status}  {meaning}\n         {body[:300]}"
 
 
+# Publishers whose vision models are the base instruction-tuned builds rather
+# than someone's merge of them.
+KNOWN_ORGS = ("qwen/", "meta-llama/", "google/", "mistralai/", "opengvlab/",
+              "openbmb/", "llava-hf/", "microsoft/", "deepseek-ai/",
+              "allenai/", "thudm/", "internlm/")
+
+# Featherless carries a great many community fine-tunes, and a large share of
+# the vision ones are roleplay merges. They will answer, and they are the wrong
+# thing to hand a perimeter identification to: tuned for character voice, often
+# with the refusal behaviour trained out. Rank them last rather than hide them,
+# because on a given day they may be all that is free.
+ROLEPLAY = ("uncensored", "heretic", "abliterated", "roleplay", "rp_",
+            "eris", "nsfw", "erotic", "waifu", "smut", "horny", "chaotic")
+
+
+def _score(model_id):
+    low = model_id.lower()
+    score = 0
+    if low.startswith(KNOWN_ORGS):
+        score += 4
+    if "instruct" in low:
+        score += 2
+    if any(t in low for t in ROLEPLAY):
+        score -= 8
+    if any(t in low for t in ("finetuned", "merge", "-lora", "experimental")):
+        score -= 2
+    # Prefer the smaller builds: on a shared endpoint they are likelier to have
+    # capacity, and quicker to answer when they do.
+    for size, bonus in (("-3b", 2), ("-4b", 2), ("-7b", 2), ("-8b", 2),
+                        ("-11b", 1), ("-12b", 1)):
+        if size in low:
+            score += bonus
+            break
+    return score
+
+
 def vision_models(catalogue, limit=12):
-    """Ids that look like vision-language models, for picking a fallback."""
+    """Vision-language ids, best candidates first.
+
+    Sorted rather than alphabetical because the alphabet puts community
+    roleplay merges at the top, and an operator reading a suggestion list
+    reasonably assumes the first entry is the recommendation.
+    """
     try:
         rows = json.loads(catalogue).get("data", [])
     except ValueError:
         return []
     ids = [r.get("id", "") for r in rows if isinstance(r, dict)]
     hits = [i for i in ids
-            if any(t in i.lower() for t in ("-vl", "vl-", "vision", "llava"))]
-    return sorted(hits)[:limit]
+            if any(t in i.lower() for t in ("-vl", "vl-", "vision", "llava",
+                                            "-vision", "internvl", "minicpm-v",
+                                            "pixtral"))]
+    return sorted(set(hits), key=lambda i: (-_score(i), len(i), i))[:limit]
 
 
 def live_call(key, model, timeout=30.0):
@@ -221,9 +264,62 @@ def main():
                     help=f"model to test with (default {DEFAULT_MODEL})")
     ap.add_argument("--list-models", action="store_true",
                     help="print the vision models this key can see, then stop")
+    ap.add_argument("--probe", type=int, nargs="?", const=6, default=0,
+                    metavar="N",
+                    help="try the top N vision models (default 6) and report "
+                         "which actually answer right now, then stop. Costs "
+                         "one tiny call each")
     args = ap.parse_args()
 
     fails = warns = 0
+
+    if args.probe:
+        key = (read_env_file(ENV_FILE)[1].get("FEATHERLESS_API_KEY")
+               or os.environ.get("FEATHERLESS_API_KEY"))
+        if not key:
+            print("no key found")
+            return 1
+        base = BASE_URL.rstrip("/")
+        status, body = _request(f"{base}/models", key)
+        if status != 200:
+            print(_explain(status, body, "-"))
+            return 1
+
+        wanted = args.model or os.environ.get("FEATHERLESS_MODEL",
+                                              DEFAULT_MODEL)
+        cands = vision_models(body, limit=args.probe)
+        if wanted not in cands:
+            cands.insert(0, wanted)
+
+        print(f"\ntrying {len(cands)} model(s) - one small call each\n")
+        working = []
+        for m in cands:
+            st, bd = _request(f"{base}/chat/completions", key, {
+                "model": m,
+                "messages": [{"role": "user", "content": "say ok"}],
+                "max_tokens": 5, "temperature": 0.0})
+            if st == 200:
+                working.append(m)
+                print(f"{OK} {m}")
+            elif st in RETRY_STATUSES:
+                print(f"{MEH} {m}  busy ({st})")
+            else:
+                short = (bd or "")[:90].replace("\n", " ")
+                print(f"{BAD} {m}  HTTP {st}  {short}")
+
+        print()
+        if not working:
+            print("nothing answered. Every candidate is busy or refused - "
+                  "wait and try again; this is capacity, not configuration.")
+            return 1
+        print(f"{len(working)} model(s) answering. Put the first in "
+              "FEATHERLESS_MODEL and keep the rest as standbys:\n")
+        print(f"  FEATHERLESS_MODEL={working[0]}")
+        if len(working) > 1:
+            print("  FEATHERLESS_FALLBACK_MODELS="
+                  + ",".join(working[1:]))
+        print("\nAdd those to ~/.astravigil.env, then restart the kiosk.")
+        return 0
 
     if args.list_models:
         key = (read_env_file(ENV_FILE)[1].get("FEATHERLESS_API_KEY")
