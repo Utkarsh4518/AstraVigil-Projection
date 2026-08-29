@@ -19,6 +19,29 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# Machine-local settings, read before anything below is decided so this file
+# can set any of them: FEATHERLESS_API_KEY, ASTRAVIGIL_ARGS, ASTRAVIGIL_PORT,
+# ASTRAVIGIL_THERMAL_ROT.
+#
+# A desktop launcher inherits the session's environment and nothing else. It
+# does not read ~/.bashrc - that is for interactive shells - and ~/.profile is
+# only sourced for the graphical session by some display managers, so "export
+# it in your shell" is not an answer that survives a double-click. Secrets do
+# not belong in the .desktop file either: install_kiosk.sh rewrites it, and it
+# is world-readable.
+#
+#   printf 'FEATHERLESS_API_KEY=sk-...\n' > ~/.astravigil.env
+#   chmod 600 ~/.astravigil.env
+ENV_FILE="${ASTRAVIGIL_ENV:-$HOME/.astravigil.env}"
+if [ -f "$ENV_FILE" ]; then
+    # set -a exports every assignment, so the pipeline inherits them.
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+fi
+
 PORT="${ASTRAVIGIL_PORT:-8000}"
 URL="http://localhost:${PORT}/?kiosk=1"
 RESTART_EXIT_CODE=42

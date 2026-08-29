@@ -209,6 +209,29 @@ ASTRAVIGIL_ARGS='--source hardware --view-fps 6' ./deploy/install_kiosk.sh
 `~/.astravigil-kiosk.log`, which is the first place to look if the icon appears
 to do nothing.
 
+### Secrets and per-rig settings
+
+The launcher sources `~/.astravigil.env` before it decides anything, so that
+file can set any of `FEATHERLESS_API_KEY`, `ASTRAVIGIL_ARGS`, `ASTRAVIGIL_PORT`
+and `ASTRAVIGIL_THERMAL_ROT`:
+
+```bash
+printf 'FEATHERLESS_API_KEY=sk-...\n' > ~/.astravigil.env
+chmod 600 ~/.astravigil.env
+```
+
+It exists because there is nowhere else that works. A desktop launcher inherits
+the graphical session's environment and nothing more: it does not read
+`~/.bashrc`, which is for interactive shells, and `~/.profile` is only sourced
+for the session by *some* display managers — so "export it in your shell" is
+not an answer that survives a double-click. The `.desktop` file is not the
+place either, because `install_kiosk.sh` rewrites it and it is world-readable.
+
+Escalation stays **off** unless `--featherless` is in `ASTRAVIGIL_ARGS` as
+well. The key alone does not enable it: sending cropped imagery of the
+protected site to a third party should take a deliberate second step, and
+nothing in the system depends on it.
+
 ## Starting on boot instead
 
 If the unit should come up watching without anyone logging in, a systemd user

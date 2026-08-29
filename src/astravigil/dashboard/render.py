@@ -18,10 +18,25 @@ Boxes are coloured by threat level rather than by class. The class is still
 written in the label, but what an operator needs at a glance is which of the
 things on screen matters.
 """
+import os
+
 import cv2
 import numpy as np
 
 from ..calibration import homography
+
+# How the thermal camera is mounted, in 90-degree anticlockwise steps applied
+# to the two thermal-space panes before they are shown. 1 = the sensor is on
+# its side and the scene needs turning a quarter turn anticlockwise to look
+# upright.
+#
+# This is a VIEW setting, not a pipeline one. Detection, tracking, the site
+# model and the homography all keep working in the sensor's own coordinates,
+# which is what keeps a site baseline learned before the mount was described
+# still valid, and what keeps calibrate_homography.py - which fits H in sensor
+# space - agreeing with the overlay. Only the pixels an operator looks at are
+# turned, along with the boxes drawn on them.
+THERMAL_VIEW_ROT = int(os.environ.get("ASTRAVIGIL_THERMAL_ROT", "1")) % 4
 
 COL_DRONE = (60, 60, 235)      # BGR - red
 COL_BIRD = (235, 170, 60)      # blue
@@ -59,6 +74,41 @@ def colourise(celsius, lo=None, hi=None):
     return cv2.applyColorMap(u8, cv2.COLORMAP_INFERNO)
 
 
+def _rot_image(img, k=None):
+    # np.rot90 returns a view with negative strides, which several cv2 calls
+    # reject outright. Make it contiguous here rather than at each use.
+    k = THERMAL_VIEW_ROT if k is None else k
+    return img if not k else np.ascontiguousarray(np.rot90(img, k))
+
+
+def _rot_point(x, y, w, h, k=None):
+    """Where (x, y) lands after _rot_image on a frame of size (h, w).
+
+    One anticlockwise quarter turn sends column x to row w-1-x and row y to
+    column y, and swaps the frame's own dimensions - so the step has to carry
+    w and h along with it to compose correctly for k of 2 and 3.
+    """
+    k = THERMAL_VIEW_ROT if k is None else k
+    for _ in range(k):
+        x, y, w, h = y, w - 1 - x, h, w
+    return x, y
+
+
+def _rot_box(box, w, h, k=None):
+    # Two opposite corners survive rotation; the rectangle is whatever they
+    # bound afterwards. Rotating the origin alone would put the box in the
+    # right place with the wrong extent for odd k.
+    #
+    # Both corners must be INCLUSIVE. _rot_point mirrors about w - 1, so
+    # handing it the exclusive far corner lands the box one pixel out on every
+    # odd quarter turn - right for k of 0 and 2, and quietly wrong for the one
+    # rotation this rig actually uses.
+    x, y, bw, bh = box
+    ax, ay = _rot_point(x, y, w, h, k)
+    bx, by = _rot_point(x + max(bw - 1, 0), y + max(bh - 1, 0), w, h, k)
+    return min(ax, bx), min(ay, by), abs(bx - ax) + 1, abs(by - ay) + 1
+
+
 def _tag(img, text, x, y, col, scale=0.4):
     cv2.putText(img, text, (x, max(12, y)), FONT, scale, (0, 0, 0), 3,
                 cv2.LINE_AA)
@@ -68,6 +118,7 @@ def _tag(img, text, x, y, col, scale=0.4):
 def thermal_view(result, scale=2):
     img = colourise(result.thermal_c)
     seen = assessment_map(result)
+    fh, fw = result.thermal_c.shape
 
     for det in result.detections:
         x, y, w, h = det.box
@@ -78,11 +129,17 @@ def thermal_view(result, scale=2):
         x, y, w, h = an.box
         cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 1)
 
+    # Turn the picture and its boxes together, then scale. The labels are
+    # placed afterwards, in rotated coordinates, so that the text itself stays
+    # the right way up - a rotated frame with sideways writing on it is worse
+    # to read than an unrotated one.
+    img = _rot_image(img)
     img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                      interpolation=cv2.INTER_NEAREST)
 
     for det in result.detections:
-        x, y = det.box[0] * scale, det.box[1] * scale
+        rx, ry, _, _ = _rot_box(det.box, fw, fh)
+        x, y = rx * scale, ry * scale
         a = seen.get(det.track_id)
         col = colour_for_level(a.level if a else "nominal")
         tag = f"#{det.track_id} {det.label}"
@@ -92,10 +149,11 @@ def thermal_view(result, scale=2):
                 tag += f" [{a.dwell_s:.0f}s still]"
         _tag(img, tag, x, y - 4, col)
     for an in result.static_anomalies:
-        x, y = an.box[0] * scale, an.box[1] * scale
-        _tag(img, f"SETTLED {an.dwell_s:.0f}s", x, y - 4, COL_SETTLED)
+        rx, ry, _, _ = _rot_box(an.box, fw, fh)
+        _tag(img, f"SETTLED {an.dwell_s:.0f}s", rx * scale, ry * scale - 4,
+             COL_SETTLED)
 
-    _banner(img, f"THERMAL 256x192  {result.proc_ms:.2f} ms detect")
+    _banner(img, f"THERMAL {fw}x{fh}  {result.proc_ms:.2f} ms detect")
     return img
 
 
@@ -203,10 +261,15 @@ def site_view(result, site, scale=2):
                                    cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(img, contours, -1, COL_SETTLED, 1)
 
+    # Same turn as the thermal pane. These two are read side by side, and a
+    # site map at ninety degrees to the picture it explains is worse than no
+    # site map at all.
+    fh, fw = result.thermal_c.shape
+    img = _rot_image(img)
     img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                      interpolation=cv2.INTER_NEAREST)
     for an in result.static_anomalies:
-        x, y, w, h = [v * scale for v in an.box]
+        x, y, w, h = [v * scale for v in _rot_box(an.box, fw, fh)]
         cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 1)
         _tag(img, f"{an.dwell_s:.0f}s  {an.peak_dev_c:+.1f}C", x, y - 4,
              COL_SETTLED)
