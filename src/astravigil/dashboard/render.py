@@ -23,7 +23,7 @@ import numpy as np
 
 from ..calibration import homography
 from ..site_intelligence.optical_baseline import (
-    MIN_LEARNED_FRAMES, Z_ANOMALOUS)
+    ACTIVITY_FLOOR, ACTIVITY_FULL, Z_ANOMALOUS)
 from ..utils.env import env_int
 
 # How the thermal camera is mounted, in 90-degree anticlockwise steps applied
@@ -76,7 +76,18 @@ COL_WATCH = (40, 175, 235)     # amber
 COL_NOMINAL = (120, 200, 130)  # muted green
 COL_SETTLED = (220, 90, 220)   # magenta - the site channel, not the detector
 COL_OPTICAL = (235, 235, 60)   # cyan - found by the optical camera alone
+COL_LEARNT = (205, 195, 70)    # the learning map, same cyan as the site scan
+COL_TRAFFIC = (80, 210, 100)   # where change normally happens
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# How many cue numbers the site panes will draw at once.
+#
+# These panes do NOT filter by threat level the way the picture panes do.
+# While a site is being learned every object scores nominal by construction,
+# so a level filter would empty the pane at exactly the moment somebody is
+# watching it to see what the model is being fed. A cap bounds the clutter
+# instead, highest threat first, which degrades sensibly in a busy room.
+SITE_BADGES = 8
 
 
 def colour_for(label):
@@ -138,6 +149,39 @@ def _rot_box(box, w, h, k=None):
     return min(ax, bx), min(ay, by), abs(bx - ax) + 1, abs(by - ay) + 1
 
 
+def _cues(result):
+    """key -> the small number every pane draws on that object."""
+    return getattr(result, "cue_numbers", None) or {}
+
+
+def _mark(img, n, text, x, y, col, scale=0.42):
+    """The object's cue number, and its label to the right of it.
+
+    One number, on every pane, for one object. The keys underneath are the
+    right thing for code and hopeless on a screen - `optical:12:31` in the
+    cross-cue trail and `#214` on the picture are the same contact, and
+    nothing visible says so. A number an operator can say out loud is what
+    makes five panes, a trail and a table describe one scene.
+
+    y is the TOP of the badge, not a text baseline, because the caller is
+    positioning it against the top edge of a box.
+    """
+    bh = 17
+    x = int(max(0, min(x, img.shape[1] - 10)))
+    y = int(max(0, min(y, img.shape[0] - bh - 2)))
+    if n is not None:
+        t = str(n)
+        (tw, _), _ = cv2.getTextSize(t, FONT, 0.48, 1)
+        bw = tw + 9
+        cv2.rectangle(img, (x, y), (x + bw, y + bh), (14, 14, 18), -1)
+        cv2.rectangle(img, (x, y), (x + bw, y + bh), col, 1)
+        cv2.putText(img, t, (x + 5, y + bh - 5), FONT, 0.48, col, 1,
+                    cv2.LINE_AA)
+        x += bw + 4
+    if text:
+        _tag(img, text, x, y + bh - 5, col, scale)
+
+
 def _tag(img, text, x, y, col, scale=0.4):
     cv2.putText(img, text, (x, max(12, y)), FONT, scale, (0, 0, 0), 3,
                 cv2.LINE_AA)
@@ -170,6 +214,7 @@ def thermal_view(result, scale=2):
     img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                      interpolation=cv2.INTER_NEAREST)
 
+    cues = _cues(result)
     for det in result.detections:
         a = seen.get(det.track_id)
         if not _worth_drawing(a):
@@ -177,16 +222,16 @@ def thermal_view(result, scale=2):
         rx, ry, _, _ = _rot_box(det.box, fw, fh)
         x, y = rx * scale, ry * scale
         col = colour_for_level(a.level if a else "nominal")
-        tag = f"#{det.track_id} {det.label}"
+        tag = det.label
         if a is not None:
             tag += f" t{a.threat:.2f}"
             if a.dwell_s >= 3:
                 tag += f" [{a.dwell_s:.0f}s still]"
-        _tag(img, tag, x, y - 4, col)
+        _mark(img, cues.get(f"track:{det.track_id}"), tag, x, y - 19, col)
     for an in result.static_anomalies:
         rx, ry, _, _ = _rot_box(an.box, fw, fh)
-        _tag(img, f"SETTLED {an.dwell_s:.0f}s", rx * scale, ry * scale - 4,
-             COL_SETTLED)
+        _mark(img, cues.get(an.key), f"SETTLED {an.dwell_s:.0f}s",
+              rx * scale, ry * scale - 19, COL_SETTLED)
 
     note = f"  +{hidden} nominal" if hidden else ""
     _banner(img,
@@ -262,13 +307,16 @@ def optical_view(result, H):
     # the writing stays the right way up.
     img = _rot_image(img, OPTICAL_VIEW_ROT)
 
+    cues = _cues(result)
+    ocues = getattr(result, "optical_cues", None) or {}
     for od in optical_only:
         rx, ry, _, _ = _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)
-        _tag(img, "OPTICAL ONLY", rx, ry - 6, COL_OPTICAL, 0.45)
+        _mark(img, ocues.get(tuple(od.box)), "OPTICAL ONLY", rx, ry - 21,
+              COL_OPTICAL, 0.45)
 
     for box, det, a, col in mapped:
         rx, ry, _, _ = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
-        tag = f"#{det.track_id} {det.label} {det.confidence:.2f}"
+        tag = f"{det.label} {det.confidence:.2f}"
         if a is not None:
             tag += f"  threat {a.threat:.2f}"
         ev = result.optical_evidence.get(det.track_id)
@@ -276,12 +324,13 @@ def optical_view(result, H):
             tag += f"  | optical: {ev.label} {ev.confidence:.2f}"
         elif ev is not None:
             tag += "  | optical: no shape"
-        _tag(img, tag, rx, ry - 6, col, 0.5)
+        _mark(img, cues.get(f"track:{det.track_id}"), tag, rx, ry - 21, col,
+              0.45)
 
     for box, an in statics:
         rx, ry, _, _ = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
-        _tag(img, f"SETTLED OBJECT {an.dwell_s:.0f}s", rx, ry - 6,
-             COL_SETTLED, 0.5)
+        _mark(img, cues.get(an.key), f"SETTLED OBJECT {an.dwell_s:.0f}s",
+              rx, ry - 21, COL_SETTLED, 0.45)
 
     c = result.cross or {}
     _banner(img, f"OPTICAL - {c.get('paired_with_thermal', 0)} paired with "
@@ -291,40 +340,88 @@ def optical_view(result, H):
     return img
 
 
-def overlay_view(result, H, alpha=0.45):
-    """Thermal warped into optical space. The frame-matching sanity check."""
+def overlay_view(result, H, alpha=0.6):
+    """Thermal warped into optical space. The frame-matching sanity check.
+
+    Only the WARM part of the thermal frame is drawn. Blending the whole of it
+    put a large flat orange rectangle over most of the optical image: the cold
+    background of a thermal frame is most of its area, it carries no
+    information here, and tinting it hid the very thing the pane exists to
+    check. What tells you the homography is right is a hot patch landing on
+    the object that is actually hot - so the hot patch is drawn, at an opacity
+    that rises with temperature, and everything below the warm threshold is
+    left as clean optical picture.
+
+    The white outline is the edge of that warm region. Registration is a
+    judgement about whether two edges coincide, and an edge is far easier to
+    judge than the middle of a gradient.
+    """
     img = result.optical.copy()
     if H is None:
         img = _rot_image(img, OPTICAL_VIEW_ROT)
         _banner(img, _uncalibrated_banner(result, "OVERLAY"))
         return img
 
-    hot = colourise(result.thermal_c)
-    warped = homography.warp(hot, H, img.shape)
+    c = result.thermal_c
+    # Warm relative to THIS scene, not to an absolute temperature: indoors
+    # everything is warm, outdoors nothing is, and a fixed threshold is wrong
+    # in one of those two places every time.
+    lo = float(np.percentile(c, 75))
+    hi = float(np.percentile(c, 99.5))
+    weight = np.clip((c - lo) / max(hi - lo, 0.5), 0.0, 1.0)
+    warped = homography.warp(colourise(c, lo, hi), H, img.shape)
+    wmap = homography.warp((weight * 255).astype(np.uint8), H, img.shape)
 
-    # Only blend where the thermal frame actually lands, so the rest of the
-    # optical image stays untinted and the registration is easy to judge.
-    coverage = homography.warp(
-        np.full(result.thermal_c.shape, 255, np.uint8), H, img.shape)
-    m = (coverage > 0)[:, :, None]
-    img = np.where(m, cv2.addWeighted(img, 1 - alpha, warped, alpha, 0), img)
+    # Per-pixel blend in uint8 rather than float32. The same arithmetic, on
+    # SIMD paths, over three quarters of a megapixel every rendered frame -
+    # the float version measured four times slower for an identical picture,
+    # and this is a Pi.
+    w3 = cv2.merge([cv2.convertScaleAbs(wmap, alpha=alpha)] * 3)
+    img = cv2.add(cv2.multiply(img, cv2.bitwise_not(w3), scale=1.0 / 255),
+                  cv2.multiply(warped, w3, scale=1.0 / 255))
+
+    contours, _ = cv2.findContours((wmap > 130).astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, (255, 255, 255), 1)
 
     h, w = result.thermal_c.shape
     corners = homography.map_points(H, [[0, 0], [w, 0], [w, h], [0, h]])
 
     fh, fw = img.shape[:2]          # before rotation
+    boxes = [(homography.map_box(H, d.box), d) for d in result.detections]
+    statics = [(homography.map_box(H, an.box), an)
+               for an in result.static_anomalies]
+
     img = _rot_image(img, OPTICAL_VIEW_ROT)
     corners = np.array(
         [_rot_point(int(px), int(py), fw, fh, OPTICAL_VIEW_ROT)
          for px, py in corners], np.int32)
+    cv2.polylines(img, [corners], True, (0, 200, 200), 1)
 
-    cv2.polylines(img, [corners], True, (0, 235, 235), 2)
-    # Label the corner that is now top-left, or the caption ends up in the
-    # middle of the frame after an odd turn.
+    # The numbered boxes are the check itself: box 3 should be drawn around
+    # the warm patch that is object 3, and if it is not, the homography has
+    # drifted and every optical crop downstream is being taken from the wrong
+    # place.
+    cues = _cues(result)
+    seen = assessment_map(result)
+    for box, det in boxes:
+        a = seen.get(det.track_id)
+        if not _worth_drawing(a):
+            continue
+        rx, ry, rw, rh = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
+        col = colour_for_level(a.level if a else "nominal")
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), col, 1)
+        _mark(img, cues.get(f"track:{det.track_id}"), "", rx, ry - 19, col)
+    for box, an in statics:
+        rx, ry, rw, rh = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_SETTLED, 1)
+        _mark(img, cues.get(an.key), "", rx, ry - 19, COL_SETTLED)
+
     tl = corners[np.argmin(corners.sum(axis=1))]
     cv2.putText(img, "thermal FOV", tuple(tl + np.array([4, 18])),
-                FONT, 0.45, (0, 235, 235), 1, cv2.LINE_AA)
-    _banner(img, f"OVERLAY - thermal warped into optical  alpha={alpha:.2f}")
+                FONT, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
+    _banner(img, "OVERLAY - warm parts of the thermal frame, in optical "
+                 "space. They should sit on what is actually hot")
     return img
 
 
@@ -362,11 +459,28 @@ def site_view(result, site, scale=2):
     img = _rot_image(img)
     img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                      interpolation=cv2.INTER_NEAREST)
+    cues = _cues(result)
     for an in result.static_anomalies:
         x, y, w, h = [v * scale for v in _rot_box(an.box, fw, fh)]
         cv2.rectangle(img, (x, y), (x + w, y + h), COL_SETTLED, 1)
-        _tag(img, f"{an.dwell_s:.0f}s  {an.peak_dev_c:+.1f}C", x, y - 4,
-             COL_SETTLED)
+        _mark(img, cues.get(an.key),
+              f"{an.dwell_s:.0f}s  {an.peak_dev_c:+.1f}C", x, y - 19,
+              COL_SETTLED)
+
+    # Number whatever the model is currently being fed, highest threat first.
+    # This is the pane an operator watches while a site is being learned, and
+    # "which of these is number 4" is the question the trail below leaves them
+    # holding.
+    seen = assessment_map(result)
+    ranked = sorted(result.detections, reverse=True,
+                    key=lambda d: (seen[d.track_id].threat
+                                   if d.track_id in seen else 0.0))
+    for det in ranked[:SITE_BADGES]:
+        a = seen.get(det.track_id)
+        x, y, w, h = [v * scale for v in _rot_box(det.box, fw, fh)]
+        col = colour_for_level(a.level if a else "nominal")
+        cv2.rectangle(img, (x, y), (x + w, y + h), col, 1)
+        _mark(img, cues.get(f"track:{det.track_id}"), "", x, y - 19, col)
 
     s = site.stats()
     state = ("LEARNING" if s["learning"] else "LEARNED")
@@ -381,21 +495,28 @@ def optical_site_view(result, site, scale=1):
 
     The mirror of site_view. That pane shows which cells are at a temperature
     the thermal camera did not expect; this one shows which cells do not look
-    the way the optical camera has learned they look.
+    the way the optical camera has learned they look. It is the half that sees
+    the object with no heat signature at all, and a baseline nobody can
+    inspect is one nobody has reason to trust.
 
-    It exists because the model was working invisibly. A baseline nobody can
-    inspect is one nobody has reason to trust - the same argument that put the
-    thermal site pane on the screen - and this half is the one that sees the
-    object with no heat signature at all.
+    Drawn as the grid it actually is, one rectangle per cell, rather than as a
+    smooth tint over the picture. Two earlier versions both came out as a flat
+    green wash over the whole frame and told an operator nothing:
 
-    Green is where change normally happens - the optical equivalent of the
-    learned traffic on the thermal pane. Coverage was the obvious thing to
-    draw and it is useless: once the model matures every cell has full
-    history, so the map is uniform and washes the whole frame flat green.
-    What an operator needs is the sparse thing, not the saturated one.
+      COVERAGE was uniform by construction. Every cell saw every frame, so
+      every cell had identical history - the map could not vary. (It can now:
+      history accrues at the rate a cell is really learning, so a cell with
+      something standing in it visibly lags.)
 
-    Magenta has looked wrong long enough to be an object; amber is off
-    baseline right now.
+      ACTIVITY was normalised against the busiest cell, and dividing by the
+      maximum guarantees something is at full brightness. A view where nothing
+      whatsoever happens rendered exactly as green as a doorway.
+
+    So: while learning, green is per-cell history and the outlined cells have
+    no model yet. Once learned, green is where change normally happens, on an
+    absolute scale - if nothing has moved through, the map is legitimately
+    empty and says so. Magenta has looked wrong long enough to be an object;
+    amber is off baseline right now.
     """
     if result.optical is None:
         return None
@@ -405,29 +526,44 @@ def optical_site_view(result, site, scale=1):
         _banner(img, "OPTICAL SITE - no optical frame learned yet")
         return img
 
-    h, w = img.shape[:2]
-
-    # While it is still learning, coverage IS the interesting map - it shows
-    # the model filling in, and an empty corner is the operator's cue that
-    # part of the frame has not been modelled yet.
-    if site.learning:
-        field = np.clip(site.ref_n / max(MIN_LEARNED_FRAMES, 1), 0, 1)
+    fh, fw = img.shape[:2]
+    cell = site.cell_px
+    learning = site.learning
+    if learning:
+        field, col = site.coverage(), COL_LEARNT
     else:
-        # Once mature, coverage is uniform and tells you nothing. Switch to
-        # where things actually happen, normalised against the busiest cell so
-        # a quiet corner is still visible next to a doorway.
-        field = site.activity / max(float(site.activity.max()), 1e-6)
-    field = cv2.resize(np.sqrt(np.clip(field, 0, 1)), (w, h),
-                       interpolation=cv2.INTER_NEAREST)
-    green = np.zeros_like(img)
-    green[:, :, 1] = (field * 190).astype(np.uint8)
-    img = cv2.addWeighted(img, 1.0, green, 0.40, 0)
+        field = np.clip((site.activity - ACTIVITY_FLOOR)
+                        / max(ACTIVITY_FULL - ACTIVITY_FLOOR, 1e-6), 0, 1)
+        col = COL_TRAFFIC
 
-    # Magenta outline: cells that have been off baseline long enough to be an
-    # object. Outlined rather than filled, so what is underneath stays
-    # readable - the operator needs to see WHAT is sitting there.
+    over = img.copy()
+    lit = 0
+    for gy, gx in zip(*np.nonzero(field > 0.02)):
+        v = float(field[gy, gx])
+        x0, y0 = int(gx) * cell, int(gy) * cell
+        # A floor under the brightness so a cell that only just clears the
+        # threshold is still visible, and the gap between rectangles so the
+        # result reads as a grid of measurements rather than a stain.
+        shade = tuple(int(round(ch * (0.3 + 0.7 * v))) for ch in col)
+        cv2.rectangle(over, (x0 + 1, y0 + 1),
+                      (x0 + cell - 2, y0 + cell - 2), shade, -1)
+        lit += 1
+    img = cv2.addWeighted(img, 0.5, over, 0.5, 0)
+
+    if learning:
+        # The holes. A cell with no history has no opinion, and an operator
+        # needs to know which part of the frame is not being watched yet
+        # rather than reading its silence as quiet.
+        for gy, gx in zip(*np.nonzero(field < 0.05)):
+            x0, y0 = int(gx) * cell, int(gy) * cell
+            cv2.rectangle(img, (x0 + 1, y0 + 1),
+                          (x0 + cell - 2, y0 + cell - 2), (72, 72, 84), 1)
+
+    # Magenta outline: off baseline long enough to be an object. Outlined
+    # rather than filled, so what is underneath stays readable - the operator
+    # needs to see WHAT is sitting there.
     settled = cv2.resize(
-        (site.persist >= site.persist_frames).astype(np.uint8), (w, h),
+        (site.persist >= site.persist_frames).astype(np.uint8), (fw, fh),
         interpolation=cv2.INTER_NEAREST)
     contours, _ = cv2.findContours(settled, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
@@ -435,7 +571,7 @@ def optical_site_view(result, site, scale=1):
 
     # Amber outline: off baseline right now, but not for long enough to
     # count. Movement in progress rather than something that has arrived.
-    live = cv2.resize((site.z_map() > Z_ANOMALOUS).astype(np.uint8), (w, h),
+    live = cv2.resize((site.z_map() > Z_ANOMALOUS).astype(np.uint8), (fw, fh),
                       interpolation=cv2.INTER_NEAREST)
     live = cv2.subtract(live, settled)
     contours, _ = cv2.findContours(live, cv2.RETR_EXTERNAL,
@@ -447,15 +583,29 @@ def optical_site_view(result, site, scale=1):
         img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
                          interpolation=cv2.INTER_NEAREST)
 
+    # The optical camera's own contacts, numbered the same as everywhere else.
+    ocues = getattr(result, "optical_cues", None) or {}
+    for od in result.optical_detections:
+        if od.thermal_match is not None:
+            continue
+        rx, ry, rw, rh = [v * scale for v in
+                          _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)]
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_OPTICAL, 1)
+        _mark(img, ocues.get(tuple(od.box)), "", rx, ry - 19, COL_OPTICAL)
+
     st = site.stats()
-    if st["learning"]:
-        _banner(img, f"OPTICAL SITE LEARNING  coverage "
-                     f"{st['maturity'] * 100:.0f}%  (green fills in as each "
-                     f"cell gains history)")
+    if learning:
+        _banner(img, f"OPTICAL SITE LEARNING {st['maturity'] * 100:.0f}%  "
+                     f"green = history learned, outlined = no model yet "
+                     f"({st['blind_cells']} cells)")
+    elif not lit:
+        _banner(img, "OPTICAL SITE LEARNED - nothing has moved through this "
+                     "view yet, so there is no traffic to draw")
     else:
         _banner(img, f"OPTICAL SITE LEARNED  green = where change normally "
-                     f"happens ({st['active_cells']} cells)  off-baseline "
-                     f"{st['anomalous_cells']}  settled {st['settled_cells']}")
+                     f"happens ({lit} cells)  off-baseline "
+                     f"{st['anomalous_cells']}  settled "
+                     f"{st['settled_cells']}")
     return img
 
 

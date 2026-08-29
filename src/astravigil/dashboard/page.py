@@ -157,7 +157,7 @@ _PAGE = r"""<!doctype html>
   .trail { background:var(--panel); border:1px solid var(--line);
            border-radius:8px; padding:6px 10px; margin-bottom:14px;
            max-height:190px; overflow-y:auto; }
-  .trail .row { display:grid; grid-template-columns:150px 1fr 1fr 54px;
+  .trail .row { display:grid; grid-template-columns:30px 150px 1fr 1fr 54px;
                 gap:10px; padding:5px 0; font-size:12px;
                 border-bottom:1px solid var(--line); align-items:baseline; }
   .trail .row:last-child { border-bottom:0; }
@@ -167,6 +167,14 @@ _PAGE = r"""<!doctype html>
   .trail .a { color:var(--dim); }
   .trail .t { text-align:right; font-variant-numeric:tabular-nums; }
   .trail .empty { color:var(--dim); margin:6px 0; }
+
+  /* The number drawn on the object itself, so a row in this list and a badge
+     on the picture are visibly the same thing. */
+  .cue { display:inline-block; min-width:22px; text-align:center;
+         padding:0 5px; border:1px solid var(--line); border-radius:5px;
+         background:#0d1014; color:var(--fg); font-size:11px;
+         font-variant-numeric:tabular-nums; line-height:17px; }
+  .cue.none { color:var(--dim); border-style:dashed; }
 
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
        color:var(--dim); margin:26px 0 8px; display:flex; gap:10px;
@@ -289,7 +297,8 @@ _PAGE = r"""<!doctype html>
       <div class="scanhud" id="scanhud"><div></div></div>
       <figcaption>Site model — green is learned traffic, magenta is a patch
         that has been off its learned temperature long enough to be an object.
-        This is what the system knows about the place it is watching.</figcaption>
+        Numbered boxes are what the model is being fed right now; the same
+        number appears on every other pane and in the cross-cue list.</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/optical" alt="optical">
@@ -297,15 +306,19 @@ _PAGE = r"""<!doctype html>
     </figure>
     <figure class="optical">
       <img src="/stream/optical_site" alt="optical site">
-      <figcaption>Optical site model — green is how much history a cell has,
-        and so how much its opinion is worth. Magenta has looked wrong long
-        enough to be an object; amber is off baseline right now. This is the
-        half that sees what has no heat signature at all.</figcaption>
+      <figcaption>Optical site model — one square per cell of the model.
+        While it is learning, green is how much history a cell has and an
+        outlined square has none yet. Once learned, green is where change
+        normally happens — an empty map means nothing has moved through, which
+        is a real answer. Magenta has looked wrong long enough to be an
+        object; amber is off baseline right now.</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/overlay" alt="overlay">
-      <figcaption>Overlay — thermal warped into optical space. Hot regions should
-        sit on things that are actually hot; if they drift, recalibrate.</figcaption>
+      <figcaption>Overlay — only the warm part of the thermal frame, warped
+        into optical space. The white outline is its edge, and it should sit on
+        the object that is actually hot. If a numbered box misses its warm
+        patch, the frame matching has drifted.</figcaption>
     </figure>
   </div>
 
@@ -315,11 +328,12 @@ _PAGE = r"""<!doctype html>
   <h2>Tracks</h2>
   <table>
     <thead><tr>
-      <th>ID</th><th>Class</th><th>Conf</th><th>Threat</th><th>Site</th>
+      <th>Cue</th><th>Track</th><th>Class</th><th>Conf</th><th>Threat</th>
+      <th>Site</th>
       <th>Still</th><th>Peak °C</th><th>Hotspot</th>
       <th>Area px</th><th>Parts</th><th>Flap</th><th>Straight</th><th>Frames</th>
     </tr></thead>
-    <tbody id="rows"><tr><td class="empty" colspan="13">no detections</td></tr></tbody>
+    <tbody id="rows"><tr><td class="empty" colspan="14">no detections</td></tr></tbody>
   </table>
 
   <p class="note"><b>Threat</b> fuses two independent answers and lets either one
@@ -447,7 +461,11 @@ function alertCard(a) {
     ? Math.floor(a.duration_s / 60) + "m" + Math.round(a.duration_s % 60) + "s"
     : Math.round(a.duration_s) + "s";
   const why = a.reasons.concat(identText(a)).filter(Boolean).join(" · ");
-  const who = a.label + (a.track_id ? " #" + a.track_id : "");
+  // The cue number if the object still has one, so a card and a badge on
+  // the picture are the same object. Falls back to the track id for an alert
+  // whose object has since left the scene and given its number back.
+  const who = a.label + (a.cue ? " #" + a.cue
+                               : (a.track_id ? " track " + a.track_id : ""));
   // Everything an operator needs at a glance is on line one; the evidence is
   // on line two, truncated, with the whole of it on hover.
   return `<div class="alert alert-${a.level} kind-${a.kind}"
@@ -638,6 +656,7 @@ async function poll() {
     const log = stats.cross_log || [];
     const thtml = log.length
       ? log.map(e => `<div class="row">
+           <span class="cue${e.cue ? "" : " none"}">${e.cue ?? "—"}</span>
            <span class="dirn">${esc(e.dir)}</span>
            <span class="q">${esc(e.asked)}</span>
            <span class="a">${esc(e.answered)}</span>
@@ -654,10 +673,11 @@ async function poll() {
 
     const body = document.getElementById("rows");
     if (!detections.length) {
-      body.innerHTML = '<tr><td class="empty" colspan="13">no detections</td></tr>';
+      body.innerHTML = '<tr><td class="empty" colspan="14">no detections</td></tr>';
     } else {
       body.innerHTML = detections.map(d => `
         <tr>
+          <td><span class="cue${d.cue ? "" : " none"}">${d.cue ?? "—"}</span></td>
           <td>#${d.track_id ?? "—"}</td>
           <td class="lbl ${d.label}">${d.label}</td>
           <td>${fmt(d.confidence)}</td>

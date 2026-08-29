@@ -80,6 +80,44 @@ TONE_FLOOR = 0.15
 # z-score at which a cell counts as off-baseline.
 Z_ANOMALOUS = 3.5
 
+# Fraction of cells that must have a full history before the model will vote.
+#
+# Not 1.0, and it cannot be. A cell with something permanently in it learns at
+# a twentieth of the normal rate by design, so on any real scene the mean
+# never reaches the top - and a model that waits for it stays silent forever.
+MATURE_AT = 0.9
+
+# How often a cell has to be off its baseline before it is drawn as somewhere
+# things happen, and how often before it is drawn at full strength. ABSOLUTE
+# fractions, deliberately.
+#
+# The first version normalised against the busiest cell, which cannot fail to
+# produce a bright map: divide by the maximum and something is always at 1.0,
+# so a view where nothing whatsoever moves renders exactly as green as a
+# doorway onto a corridor. That is the flat wash an operator reported as "just
+# green, nothing useful". A floor in real units is what makes an empty map
+# legitimately empty.
+ACTIVITY_FLOOR = 0.02
+ACTIVITY_FULL = 0.25
+
+# The largest deviation, in sigma, that is allowed to enter a cell's VARIANCE.
+#
+# Slowing the mean down on an anomalous cell is not enough on its own, and the
+# arithmetic says why. The variance update moves by alpha * d squared, so a
+# 35-sigma object contributes 1225 times the current variance; even at the
+# damped rate that is roughly a doubling of the variance every frame. Ten
+# frames later sigma has grown thirty-fold, the object measures 1 sigma, and
+# the cell has decided a stationary intruder is what normal looks like.
+#
+# Measured, not theorised: a block parked in one cell went from 35 sigma to
+# 1.2 sigma in about 140 frames, resetting the persistence counter before it
+# could reach the six seconds that mark something as settled. The one thing
+# this model exists to catch - an object that arrives and stays - could not
+# fire. Winsorising the update to 4 sigma keeps the variance responsive to
+# ordinary drift and stops a single anomaly from teaching the cell to ignore
+# it.
+MAX_DEV_SIGMA = 4.0
+
 
 class OpticalBaseline:
     def __init__(self, shape=(480, 640), cell_px=CELL_PX, fps=25.0,
@@ -118,7 +156,11 @@ class OpticalBaseline:
 
     @property
     def learning(self):
-        return self.maturity < 1.0
+        return self.maturity < MATURE_AT
+
+    def coverage(self):
+        """Per-cell history, 0..1. What the learning map draws."""
+        return np.clip(self.ref_n / max(MIN_LEARNED_FRAMES, 1), 0, 1)
 
     def stats(self):
         return {
@@ -127,7 +169,8 @@ class OpticalBaseline:
             "learning": bool(self.learning),
             "anomalous_cells": int((self._z > Z_ANOMALOUS).sum()),
             "settled_cells": int((self.persist >= self.persist_frames).sum()),
-            "active_cells": int((self.activity > 0.02).sum()),
+            "active_cells": int((self.activity >= ACTIVITY_FLOOR).sum()),
+            "blind_cells": int((self.ref_n < MIN_LEARNED_FRAMES).sum()),
             "cells": int(self.gh * self.gw),
         }
 
@@ -211,14 +254,26 @@ class OpticalBaseline:
             alpha = np.maximum(1.0 / np.maximum(self.ref_n + 1.0, 1.0),
                                self.alpha_floor)
             alpha = np.where(hot, alpha * 0.05, alpha).astype(np.float32)
+            # History counts at the rate the cell is actually learning, not at
+            # one frame per frame. Before this, ref_n rose by 1 everywhere on
+            # every frame - so coverage was IDENTICAL in every cell and the
+            # map that was meant to show the model filling in could only ever
+            # be a uniform wash. Counting effective samples makes a cell with
+            # somebody standing in it visibly lag its neighbours, which is
+            # exactly the thing worth seeing.
+            gain = np.where(hot, 0.05, 1.0).astype(np.float32)
 
             d_s = structure - self.struct_mean
             self.struct_mean += alpha * d_s
-            self.struct_var += alpha * (d_s * d_s - self.struct_var)
+            self.struct_var += alpha * (
+                np.minimum(d_s * d_s, (MAX_DEV_SIGMA * s_std) ** 2)
+                - self.struct_var)
             d_t = tone - self.tone_mean
             self.tone_mean += alpha * d_t
-            self.tone_var += alpha * (d_t * d_t - self.tone_var)
-            self.ref_n += 1.0
+            self.tone_var += alpha * (
+                np.minimum(d_t * d_t, (MAX_DEV_SIGMA * t_std) ** 2)
+                - self.tone_var)
+            self.ref_n += gain
 
         return self._z
 

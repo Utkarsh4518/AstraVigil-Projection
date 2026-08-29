@@ -40,6 +40,7 @@ from .drivers.thermal.calibration import calibrate_frame
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
+from .fusion.cues import CueBoard
 from .llm import Escalator
 from .site_intelligence import DwellMonitor, SiteBaseline
 from .site_intelligence.optical_baseline import OpticalBaseline
@@ -56,7 +57,9 @@ class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
                  "healthy", "assessments", "alerts", "static_anomalies",
-                 "site_stats", "optical_site_stats", "cross_log", "novelty", "optical_detections",
+                 "site_stats", "optical_site_stats", "cross_log",
+                 "cue_numbers", "optical_cues", "novelty",
+                 "optical_detections",
                  "optical_evidence", "cross", "optical_roi", "learning",
                  "identifications", "escalation")
 
@@ -90,6 +93,10 @@ class Result:
         self.optical_detections = []   # what the optical camera found alone
         self.optical_evidence = {}     # track_id -> optical's shape answer
         self.cross = {}                # cue counts, for the dashboard
+        # The small number every pane draws on this object, so the same thing
+        # can be found on five views, in the trail and in the table.
+        self.cue_numbers = {}          # key -> small int
+        self.optical_cues = {}         # optical-only box tuple -> small int
         self.optical_roi = None        # where optical is allowed to look
         self.learning = {}             # operator-driven learning run
         self.identifications = {}      # key -> remote model's answer
@@ -152,6 +159,8 @@ class Pipeline:
         # which is the entire argument for having two sensors, and until now
         # the one part of it nobody could see.
         self.cross_log = collections.deque(maxlen=CROSS_LOG_MAX)
+        # One number per object under discussion, shared by every pane.
+        self.cues = CueBoard()
         self.dwell = DwellMonitor()
         self.alerts = alerts if alerts is not None else AlertManager()
         self.frame_index = 0
@@ -223,6 +232,9 @@ class Pipeline:
     def _note_cross(self, direction, key, label, asked, answered, threat):
         self.cross_log.appendleft({
             "dir": direction, "key": key, "label": label,
+            # The same number that is drawn on the object itself. Without it
+            # the trail is a list of things a reader has to go and find.
+            "cue": self.cues.number(key, self.now()),
             "asked": asked, "answered": answered,
             "threat": round(float(threat), 2),
             "frame": self.frame_index,
@@ -423,6 +435,7 @@ class Pipeline:
         # thermal detection claimed. This is the direction that covers
         # thermal's blind spots, so it runs even when thermal is silent.
         confirmed = 0
+        optical_cues = {}
         dwells = self.optical_contacts.update(unmatched_optical, now)
         for odet in unmatched_optical:
             th = verify_thermal(res.thermal_c, self.H, odet.box)
@@ -431,12 +444,22 @@ class Pipeline:
             key = self.optical_contacts.key_for(odet.centroid)
             oa = assess_optical_only(odet, th, key, dwells.get(key, 0.0))
             assessments.append(oa)
+            # Keyed by box because an optical detection has no id of its own
+            # and the renderer has only the detection in hand.
+            optical_cues[tuple(odet.box)] = self.cues.number(key, now)
             dwell = dwells.get(key, 0.0)
             self._note_cross(
                 "optical asks thermal", key, oa.label,
                 f"something here thermal never claimed, still for "
                 f"{dwell:.0f} s - is it warm?",
                 self._thermal_answer(th), oa.threat)
+
+        # Number everything on screen, then release the numbers of things
+        # that have been gone a while. Pruning after the refresh, never
+        # before, or an object present this very frame loses its number.
+        for a in assessments:
+            self.cues.number(a.key, now)
+        self.cues.prune(now)
 
         assessments.sort(key=lambda a: a.threat, reverse=True)
 
@@ -463,6 +486,8 @@ class Pipeline:
         res.optical_site_stats = (self.optical_site.stats()
                                   if self.optical_site is not None else None)
         res.cross_log = list(self.cross_log)
+        res.cue_numbers = self.cues.snapshot()
+        res.optical_cues = optical_cues
         res.learning = self.learning_status()
         res.identifications = {
             a.key: self.escalator.result_for(a.key).as_dict()

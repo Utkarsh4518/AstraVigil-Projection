@@ -173,6 +173,9 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             d["site_risk"] = round(a.site_risk, 3) if a else 0.0
             d["dwell_s"] = round(a.dwell_s, 1) if a else 0.0
             d["key"] = a.key if a else None
+            # The number drawn on this object in every pane, so a row in the
+            # table and a badge on the picture are the same thing.
+            d["cue"] = result.cue_numbers.get(d["key"])
 
         mean_tick = sum(ticks) / len(ticks) if ticks else 0.0
         stats = {
@@ -217,6 +220,7 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             ident = result.identifications.get(a["key"])
             if ident is not None:
                 a["identification"] = ident
+            a["cue"] = result.cue_numbers.get(a["key"])
         state.publish_data(dets, [a.as_dict() for a in result.assessments],
                            alerts, stats)
 
