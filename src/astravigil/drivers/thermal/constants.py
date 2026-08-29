@@ -26,8 +26,7 @@ PRODUCT_ID = 0x0102
 STREAM_INTERFACE = 1
 STREAM_ENDPOINT = 0x81
 
-# UVC control requests, used to read the streaming format the camera has
-# already negotiated and hand it straight back to commit it.
+# UVC control requests, used to negotiate the streaming format at open time.
 UVC_SET_CUR = 0x01
 UVC_GET_CUR = 0x81
 UVC_REQ_TYPE_SET = 0x21
@@ -35,6 +34,24 @@ UVC_REQ_TYPE_GET = 0xA1
 PROBE_CONTROL = 0x0100
 COMMIT_CONTROL = 0x0200
 PROBE_LENGTH = 34
+
+# The mode we ask for, by the indices the camera advertises in its descriptors:
+#
+#   format 1, frame 1   256 x 344, 16 bits/pixel   the raw thermal stream
+#   format 2, frame 2   256 x 192, 12 bits/pixel   NV12, what V4L2 shows
+#
+# The camera powers up on the NV12 mode, so the one we want has to be asked
+# for by index. Overridable because these are per-unit descriptor numbers, and
+# checking a different pair should not need a code change:
+#
+#   lsusb -v -d 2bdf:0102     # look for VideoStreaming Interface Descriptors
+STREAM_FORMAT_INDEX = int(os.environ.get("ASTRAVIGIL_FORMAT_INDEX", "1"))
+STREAM_FRAME_INDEX = int(os.environ.get("ASTRAVIGIL_FRAME_INDEX", "1"))
+
+# Byte offsets into the 34-byte probe/commit control block (UVC 1.1).
+PROBE_FORMAT_INDEX = 2       # bFormatIndex
+PROBE_FRAME_INDEX = 3        # bFrameIndex
+PROBE_MAX_FRAME_SIZE = 18    # dwMaxVideoFrameSize, 4 bytes little-endian
 
 # Frame geometry. The sensor is 256x192, but every frame carries 344 rows of
 # 16-bit little-endian values: 192 rows of thermal data, then a metadata row,

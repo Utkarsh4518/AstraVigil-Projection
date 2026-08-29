@@ -18,9 +18,17 @@ import usb.util
 
 from .constants import (
     COMMIT_CONTROL,
+    EXPECTED_FRAME_BYTES,
+    FRAME_H,
+    FRAME_W,
     PRODUCT_ID,
     PROBE_CONTROL,
+    PROBE_FORMAT_INDEX,
+    PROBE_FRAME_INDEX,
     PROBE_LENGTH,
+    PROBE_MAX_FRAME_SIZE,
+    STREAM_FORMAT_INDEX,
+    STREAM_FRAME_INDEX,
     STREAM_INTERFACE,
     UVC_GET_CUR,
     UVC_REQ_TYPE_GET,
@@ -69,7 +77,7 @@ def open_camera():
         ) from exc
 
     try:
-        _commit_current_format(dev)
+        _negotiate_format(dev)
         usb.util.claim_interface(dev, STREAM_INTERFACE)
     except Exception:
         _reattach(dev, detached)
@@ -94,25 +102,86 @@ def _detach_kernel_drivers(dev):
     return detached
 
 
-def _commit_current_format(dev):
-    # Read back the format the camera is already set to and hand it straight
-    # back to commit it. We never try to negotiate a different format - the
-    # camera's own default is the 256x344 16-bit stream we want, and probing
-    # for anything else is what upsets this device.
+def _check_negotiated(probe):
+    # dwMaxVideoFrameSize is the camera's own statement of how big one frame in
+    # the mode it has just accepted will be. If that is smaller than the frame
+    # the reader cuts, no frame can ever be complete: every one is counted
+    # short and the stream looks silent rather than misconfigured, which is a
+    # far harder thing to diagnose than an error at open time.
+    size = int.from_bytes(
+        bytes(probe[PROBE_MAX_FRAME_SIZE:PROBE_MAX_FRAME_SIZE + 4]), "little")
+
+    # Zero means the camera never filled the field in. This device is not fully
+    # UVC-compliant, and no answer is not the same as a wrong answer.
+    if not size or size >= EXPECTED_FRAME_BYTES:
+        return
+
+    raise ThermalCameraError(
+        f"the camera negotiated format {probe[PROBE_FORMAT_INDEX]}, frame "
+        f"{probe[PROBE_FRAME_INDEX]}, which carries {size} bytes per frame. "
+        f"The {FRAME_W}x{FRAME_H} 16-bit stream this driver reads needs "
+        f"{EXPECTED_FRAME_BYTES}, so no frame would ever complete."
+        f"\n  Check which indices carry the raw thermal mode on this unit:"
+        f"\n      lsusb -v -d {VENDOR_ID:04x}:{PRODUCT_ID:04x}"
+        f"\n  and re-run with the pair that carries it:"
+        f"\n      ASTRAVIGIL_FORMAT_INDEX=n ASTRAVIGIL_FRAME_INDEX=n"
+        f" python3 scripts/thermal_probe.py 20"
+    )
+
+
+def _negotiate_format(dev):
+    # Ask for the raw 16-bit thermal stream, then commit what the camera
+    # negotiates back.
+    #
+    # This used to read the camera's current format and hand it straight back,
+    # on the assumption that the power-on default was already the mode we want.
+    # It is not. The Mini2 Plus V2 comes up on its NV12 256x192 mode (format 2,
+    # frame 2) and advertises the raw 256x344 16-bit stream separately as
+    # format 1, frame 1. Committing the default started a 73728-byte NV12
+    # stream while frame_reader was cutting frames at 176128 bytes, so every
+    # frame was counted short and none was ever yielded: thermal_probe reported
+    # `frames=0, short=499`, ThermalStream.start() timed out waiting for a
+    # first frame, and run_dashboard died before it ever bound its port - which
+    # is why the kiosk had nothing to open.
+    #
+    # The GET between the two SETs is the step that is easy to leave out and is
+    # load-bearing: the camera fills in dwMaxVideoFrameSize and
+    # dwMaxPayloadTransferSize for the mode it has just accepted, and the
+    # commit has to carry those, not the NV12 numbers we started from.
+    #
+    #   GET_CUR probe -> set format/frame -> SET_CUR probe
+    #                 -> GET_CUR probe -> SET_CUR commit
     last_error = None
 
     for attempt in range(HANDSHAKE_ATTEMPTS):
         try:
-            probe = dev.ctrl_transfer(
+            probe = bytearray(dev.ctrl_transfer(
                 UVC_REQ_TYPE_GET, UVC_GET_CUR,
                 PROBE_CONTROL, STREAM_INTERFACE, PROBE_LENGTH, timeout=1000,
-            )
+            ))
+            probe[PROBE_FORMAT_INDEX] = STREAM_FORMAT_INDEX
+            probe[PROBE_FRAME_INDEX] = STREAM_FRAME_INDEX
+
             dev.ctrl_transfer(
                 UVC_REQ_TYPE_SET, UVC_SET_CUR,
-                COMMIT_CONTROL, STREAM_INTERFACE, probe, timeout=1000,
+                PROBE_CONTROL, STREAM_INTERFACE, bytes(probe), timeout=1000,
+            )
+            negotiated = bytearray(dev.ctrl_transfer(
+                UVC_REQ_TYPE_GET, UVC_GET_CUR,
+                PROBE_CONTROL, STREAM_INTERFACE, PROBE_LENGTH, timeout=1000,
+            ))
+            dev.ctrl_transfer(
+                UVC_REQ_TYPE_SET, UVC_SET_CUR,
+                COMMIT_CONTROL, STREAM_INTERFACE, bytes(negotiated),
+                timeout=1000,
             )
             time.sleep(SETTLE_AFTER_COMMIT_S)
-            return probe
+
+            # Deliberately outside the USBError retry: a mode the camera has
+            # agreed to that is still the wrong size is a configuration answer,
+            # not a transient failure, and asking twice more will not fix it.
+            _check_negotiated(negotiated)
+            return bytes(negotiated)
         except usb.core.USBError as exc:
             last_error = exc
             if attempt < HANDSHAKE_ATTEMPTS - 1:
