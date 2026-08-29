@@ -93,7 +93,8 @@ class Pipeline:
     def __init__(self, source, H=None, threshold_c=1.5, site=None,
                  alerts=None, fps=25.0, clock="wall", learn=True,
                  cross_cue=True, optical_every_n=3, escalator=None,
-                 escalate_at=0.75, policy=None):
+                 escalate_at=0.75, policy=None, auto_calibrate=True,
+                 calibration_path=None):
         self.source = source
         self.H = H
         # Authored site policy - what is ALLOWED here, as opposed to what the
@@ -112,6 +113,16 @@ class Pipeline:
         self.escalator = escalator if escalator is not None else Escalator()
         self.escalate_at = escalate_at
         self._roi_set = False
+        # Frame matching from the scene itself, for the case where nobody has
+        # run scripts/calibrate_homography.py yet. Only ever created when
+        # there is no homography to start with: a manual fit made at watch
+        # range beats one learned from whatever happened to walk past, and
+        # replacing it would be helpfulness nobody asked for.
+        self.autocal = None
+        self.calibration_path = calibration_path
+        if auto_calibrate and cross_cue and H is None:
+            from .calibration.auto import AutoCalibrator
+            self.autocal = AutoCalibrator()
         self.tracker = Tracker()
         self.fps = fps
         # "wall" is right when the loop is paced to real time, which is every
@@ -188,6 +199,29 @@ class Pipeline:
             out["done"] = elapsed >= target
         return out
 
+    def _save_calibration(self, H):
+        """Write the learned homography out, so the next run starts with it.
+
+        Failing to save is not failing to calibrate: the fit is already in
+        self.H and the run continues with it either way. Say so and carry on
+        rather than losing a calibration that took minutes to earn over a
+        directory that is not writable.
+        """
+        if not self.calibration_path:
+            return
+        st = self.autocal.status()
+        try:
+            homography.save(self.calibration_path, H, {
+                "source": "auto",
+                "n_points": st["pairs"],
+                "reprojection_mean_px": st["error_px"],
+            })
+            print(f"auto-calibration: saved {self.calibration_path} "
+                  f"({st['pairs']} pairs, {st['error_px']} px)")
+        except OSError as exc:
+            print(f"auto-calibration: fitted but could not save "
+                  f"({exc}) - this run is calibrated, the next is not")
+
     def now(self):
         if self.clock == "frames":
             return self.frame_index / self.fps
@@ -215,6 +249,20 @@ class Pipeline:
 
         # --- the optical camera doing its own job, not just answering
         optical_dets, pairs, unmatched_optical = [], {}, []
+
+        # No homography yet: run the optical detector over the WHOLE frame -
+        # there is no thermal footprint to confine it to until we have one -
+        # and let the calibrator watch for frames it can pair unambiguously.
+        if (self.autocal is not None and self.H is None
+                and self.cross_cue and optical is not None):
+            found = self.optical.update(optical)
+            H_new = self.autocal.observe(detections, found,
+                                         res.thermal_c.shape)
+            if H_new is not None:
+                self.H = H_new
+                self._roi_set = False
+                self._save_calibration(H_new)
+
         if self.cross_cue and optical is not None and self.H is not None:
             if not self._roi_set:
                 self.optical.set_roi_from_homography(
@@ -308,6 +356,8 @@ class Pipeline:
             "shape_checks": len(evidence),
             "shape_usable": sum(1 for e in evidence.values() if e.usable),
             "enabled": bool(self.cross_cue),
+            "auto_calibration": (self.autocal.status()
+                                 if self.autocal is not None else None),
         }
         res.assessments = assessments
         res.static_anomalies = statics

@@ -1,6 +1,8 @@
 """The dashboard page. Kept as one string so the app has no template dir."""
 
-PAGE = r"""<!doctype html>
+from .render import OPTICAL_VIEW_ROT, THERMAL_VIEW_ROT
+
+_PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -76,7 +78,8 @@ PAGE = r"""<!doctype html>
   /* Scrollbars only inside the columns, and unobtrusive. */
   .stack::-webkit-scrollbar { width:8px; }
   .stack::-webkit-scrollbar-thumb { background:#2c343e; border-radius:4px; }
-  @media (max-width:900px) { .board { grid-template-columns:1fr; } }
+  @media (max-width:900px) { .board { grid-template-columns:1fr; }
+                             .views { grid-template-columns:1fr; } }
   .alert { display:grid; gap:2px 14px; padding:10px 14px; border-radius:8px;
            background:var(--panel); border:1px solid var(--line);
            border-left:4px solid var(--nominal);
@@ -118,22 +121,26 @@ PAGE = r"""<!doctype html>
   .bar i { display:block; height:100%; background:var(--ok); width:0; }
 
   /* --- views --------------------------------------------------------- */
+  /* Columns are sized in proportion to what each pane actually shows, so a
+     portrait pane gets a portrait column and a landscape one a landscape
+     column. Every image then fills its own box at the same row height with
+     no letterboxing and nothing cropped - the black bars either side of the
+     thermal panes were the cost of forcing one 4:3 box on both shapes. */
   .views { display:grid; gap:14px; align-items:stretch;
-           grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
+           grid-template-columns:__TH_FR__fr __TH_FR__fr __OP_FR__fr __OP_FR__fr; }
   figure { margin:0; background:var(--panel); border:1px solid var(--line);
            border-radius:8px; overflow:hidden;
            display:flex; flex-direction:column; }
-  /* Every pane is the same 4:3 box, whatever shape its source is.
-     The thermal panes are PORTRAIT - the sensor is mounted on its side, so
-     192x256 after the view rotation - while optical is landscape 640x480.
-     Left to size themselves, the portrait panes drove the row height and the
-     optical ones sat in a column of dead space.
-     contain, not cover: cropping a thermal pane would hide detections at the
-     edge of frame, which is where something entering the site appears. The
-     letterboxing on the thermal panes is the honest cost of a camera mounted
-     sideways. */
-  figure img { flex:none; width:100%; aspect-ratio:4/3; object-fit:contain;
+  /* Each pane declares its own shape, filled from the view rotation at
+     import time, and its column is sized to match.
+     Still contain, never cover: cropping a thermal pane would hide detections
+     at the edge of frame, which is exactly where something entering the site
+     first appears. With the column matched to the image there is nothing left
+     to letterbox, so contain costs nothing here. */
+  figure img { flex:none; width:100%; object-fit:contain;
                display:block; background:#000; }
+  figure.thermal img { aspect-ratio:__TH_ASPECT__; }
+  figure.optical img { aspect-ratio:__OP_ASPECT__; }
   figcaption { flex:1; padding:8px 12px; font-size:12px; color:var(--dim);
                border-top:1px solid var(--line); }
 
@@ -247,12 +254,12 @@ PAGE = r"""<!doctype html>
   </div>
 
   <div class="views">
-    <figure>
+    <figure class="thermal">
       <img src="/stream/thermal" alt="thermal">
       <figcaption>Thermal — warm movers against cold sky. Detection runs here.
         Boxes are coloured by threat, not by class.</figcaption>
     </figure>
-    <figure class="scanwrap">
+    <figure class="scanwrap thermal">
       <img src="/stream/site" alt="site">
       <canvas id="scan"></canvas>
       <div class="scanhud" id="scanhud"><div></div></div>
@@ -260,11 +267,11 @@ PAGE = r"""<!doctype html>
         that has been off its learned temperature long enough to be an object.
         This is what the system knows about the place it is watching.</figcaption>
     </figure>
-    <figure>
+    <figure class="optical">
       <img src="/stream/optical" alt="optical">
       <figcaption>Optical — thermal detections mapped through the homography.</figcaption>
     </figure>
-    <figure>
+    <figure class="optical">
       <img src="/stream/overlay" alt="overlay">
       <figcaption>Overlay — thermal warped into optical space. Hot regions should
         sit on things that are actually hot; if they drift, recalibrate.</figcaption>
@@ -619,3 +626,23 @@ poll();
 </body>
 </html>
 """
+
+
+# A quarter or three-quarter turn swaps a pane's width and height, so the
+# shape the browser must reserve depends on the view rotation - which is why
+# this is filled in here rather than written into the stylesheet.
+#
+# The fr numbers are the aspect ratios themselves. Sizing each column in
+# proportion to what it holds is what makes every pane come out the same
+# height with none of them letterboxed.
+def _shape(rot):
+    return ("3 / 4", "0.75") if rot % 2 else ("4 / 3", "1.3333")
+
+
+_TH_ASPECT, _TH_FR = _shape(THERMAL_VIEW_ROT)
+_OP_ASPECT, _OP_FR = _shape(OPTICAL_VIEW_ROT)
+
+PAGE = (_PAGE.replace("__TH_ASPECT__", _TH_ASPECT)
+             .replace("__OP_ASPECT__", _OP_ASPECT)
+             .replace("__TH_FR__", _TH_FR)
+             .replace("__OP_FR__", _OP_FR))

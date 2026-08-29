@@ -24,7 +24,7 @@ class CalibrationError(RuntimeError):
     pass
 
 
-def compute(thermal_pts, optical_pts, ransac_px=3.0):
+def compute(thermal_pts, optical_pts, ransac_px=3.0, max_iters=2000):
     """Least-squares homography from matched points, thermal -> optical.
 
     Returns (H, inlier_mask). Four points is the algebraic minimum; use more
@@ -42,7 +42,11 @@ def compute(thermal_pts, optical_pts, ransac_px=3.0):
         H = cv2.getPerspectiveTransform(t.reshape(4, 2), o.reshape(4, 2))
         mask = np.ones((4, 1), np.uint8)
     else:
-        H, mask = cv2.findHomography(t, o, cv2.RANSAC, ransac_px)
+        # max_iters matters when most of the input is wrong on purpose, as
+        # it is for the automatic calibrator: OpenCV's default assumes a
+        # healthy inlier ratio and quietly gives up early without one.
+        H, mask = cv2.findHomography(t, o, cv2.RANSAC, ransac_px,
+                                     maxIters=max_iters)
 
     if H is None:
         raise CalibrationError(

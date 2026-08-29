@@ -168,12 +168,26 @@ def thermal_view(result, scale=2):
     return img
 
 
+def _uncalibrated_banner(result, what):
+    """What to say on a pane that has no homography yet.
+
+    "not calibrated" is a true statement that gives the operator nothing to do.
+    While the automatic calibrator is running there is something far more
+    useful to show: whether it is making progress, and what would help it -
+    which is almost always "walk something across more of the view".
+    """
+    auto = (getattr(result, "cross", None) or {}).get("auto_calibration")
+    if not auto:
+        return f"{what} - not calibrated"
+    return f"{what} - auto-calibrating: {auto['reason']}"
+
+
 def optical_view(result, H):
     img = result.optical.copy()
     fh, fw = img.shape[:2]          # before rotation - _rot_box needs these
     if H is None:
         img = _rot_image(img, OPTICAL_VIEW_ROT)
-        _banner(img, "OPTICAL - not calibrated")
+        _banner(img, _uncalibrated_banner(result, "OPTICAL"))
         return img
 
     seen = assessment_map(result)
@@ -244,7 +258,7 @@ def overlay_view(result, H, alpha=0.45):
     img = result.optical.copy()
     if H is None:
         img = _rot_image(img, OPTICAL_VIEW_ROT)
-        _banner(img, "OVERLAY - calibrate to enable")
+        _banner(img, _uncalibrated_banner(result, "OVERLAY"))
         return img
 
     hot = colourise(result.thermal_c)

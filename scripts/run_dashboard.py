@@ -147,6 +147,11 @@ def main():
     p.add_argument("--no-learn", action="store_true",
                    help="freeze the site model - score against it but do not "
                         "update it")
+    p.add_argument("--no-auto-calibrate", action="store_true",
+                   help="do not learn the homography from the scene. Without "
+                        "a calibration file the optical pane, the overlay and "
+                        "the whole cross-cue path stay switched off until "
+                        "somebody runs scripts/calibrate_homography.py")
     p.add_argument("--uncalibrated", action="store_true",
                    help="ignore ground truth in simulation, to see the "
                         "uncalibrated state")
@@ -217,7 +222,9 @@ def main():
     pipeline = Pipeline(source, H=H, threshold_c=args.threshold, policy=policy, site=site,
                         alerts=alerts, fps=args.fps,
                         learn=not args.no_learn, escalator=escalator,
-                        escalate_at=args.escalate_at)
+                        escalate_at=args.escalate_at,
+                        auto_calibrate=not args.no_auto_calibrate,
+                        calibration_path=args.calibration or DEFAULT_CALIBRATION)
 
     state = DashboardState()
     worker = threading.Thread(target=capture_loop,
