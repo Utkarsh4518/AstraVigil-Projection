@@ -118,12 +118,23 @@ PAGE = r"""<!doctype html>
   .bar i { display:block; height:100%; background:var(--ok); width:0; }
 
   /* --- views --------------------------------------------------------- */
-  .views { display:grid; gap:14px;
+  .views { display:grid; gap:14px; align-items:stretch;
            grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
   figure { margin:0; background:var(--panel); border:1px solid var(--line);
-           border-radius:8px; overflow:hidden; }
-  figure img { width:100%; display:block; background:#000; }
-  figcaption { padding:8px 12px; font-size:12px; color:var(--dim);
+           border-radius:8px; overflow:hidden;
+           display:flex; flex-direction:column; }
+  /* Every pane is the same 4:3 box, whatever shape its source is.
+     The thermal panes are PORTRAIT - the sensor is mounted on its side, so
+     192x256 after the view rotation - while optical is landscape 640x480.
+     Left to size themselves, the portrait panes drove the row height and the
+     optical ones sat in a column of dead space.
+     contain, not cover: cropping a thermal pane would hide detections at the
+     edge of frame, which is where something entering the site appears. The
+     letterboxing on the thermal panes is the honest cost of a camera mounted
+     sideways. */
+  figure img { flex:none; width:100%; aspect-ratio:4/3; object-fit:contain;
+               display:block; background:#000; }
+  figcaption { flex:1; padding:8px 12px; font-size:12px; color:var(--dim);
                border-top:1px solid var(--line); }
 
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
