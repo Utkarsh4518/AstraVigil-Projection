@@ -23,9 +23,10 @@ why there are three independent ways out rather than one.
 
 ```
 0.  restart button                     stays visible in kiosk mode
-1.  Ctrl+Shift+Esc  ×3 within 3 s      in-page, with an on-screen counter
-2.  deploy/stop-kiosk.sh               terminal or SSH - needs no browser
-3.  Ctrl+Alt+F2                        text console, then run (2)
+1.  "close console" button            top right of the page, two clicks
+2.  Ctrl+Shift+Esc  ×3 within 3 s      in-page, with an on-screen counter
+3.  deploy/stop-kiosk.sh               terminal or SSH - needs no browser
+4.  Ctrl+Alt+F2                        text console, then run (3)
 ```
 
 Escaping performs a **full stop**: browser, pipeline, port and camera all
@@ -52,6 +53,22 @@ default — the default disposition kills the process outright — so
 Anything that does have to be forced triggers `scripts/release_camera.py`,
 which resets the USB device so the claim is dropped. Killing hardest is the
 thing that breaks "ready to use next time".
+
+## The close button
+
+Top right of the console, and the way out to reach for first. Click it once to
+arm — it turns red and reads "click again to stop" — then click again within
+four seconds.
+
+Two clicks rather than one because a single-click kill on an always-on console
+is one sleeve-brush away from taking the sensor down mid-demo. It is the same
+"you meant this" test the keyboard sequence applies, without depending on a
+shortcut that may never arrive.
+
+**Prefer it to the key sequence.** Linux desktops commonly grab Ctrl+Shift+Esc
+for their own task manager before the page ever sees it, which leaves an
+operator in a fullscreen window with no address bar and a shortcut that does
+nothing. The button cannot be intercepted.
 
 ## The escape sequence
 

@@ -9,7 +9,9 @@
 # want to discover in front of an audience.
 #
 # ESCAPING
-#   Ctrl+Shift+Esc three times within three seconds  (on-screen counter)
+#   the "close console" button, top right of the page  (two clicks)
+#   Ctrl+Shift+Esc three times within three seconds  (on-screen counter,
+#     but many Linux desktops grab this before the page sees it)
 #   deploy/stop-kiosk.sh                             (over SSH, or a terminal)
 #   Ctrl+Alt+F2                                      (switch to a text console)
 #

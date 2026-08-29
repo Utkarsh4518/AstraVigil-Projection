@@ -188,6 +188,12 @@ PAGE = r"""<!doctype html>
   #esc b { color:var(--watch); font-variant-numeric:tabular-nums; }
   #kioskbar { display:none; gap:8px; align-items:center; }
   body.kiosk #kioskbar { display:flex; }
+  /* The way out has to be visible. Ctrl+Shift+Esc is grabbed by the desktop
+     on Linux before the page ever sees it, which leaves an operator in a
+     fullscreen window with no address bar and a shortcut that does nothing. */
+  button.danger { border-color:#5a2230; color:#ff9d8a; }
+  button.danger:hover { background:#3a1a17; }
+  button.danger.armed { background:#5a2230; color:#fff; border-color:#8a3444; }
 </style>
 </head>
 <body>
@@ -213,6 +219,8 @@ PAGE = r"""<!doctype html>
     <button class="devonly" onclick="saveSite()" title="Write the learned site model to disk">save site model</button>
     <span id="kioskbar">
       <button onclick="kioskRestart()" title="Restart the console">restart</button>
+      <button id="closebtn" class="danger" onclick="kioskClose()"
+              title="Stop AstraVigil and close the console">close console</button>
     </span>
   </div>
 </header>
@@ -312,6 +320,35 @@ function escHint(html, ms) {
   escHint._t = setTimeout(() => box.classList.remove("show"), ms);
 }
 
+/* Two clicks, not one. A single-click kill on an always-on console is one
+   sleeve-brush away from taking the sensor down mid-demo. Two clicks inside
+   four seconds is the same "you meant this" test the triple-Esc was for,
+   without depending on a shortcut the desktop intercepts. */
+let closeArmed = 0;
+
+function kioskClose() {
+  const b = document.getElementById("closebtn");
+  const now = Date.now();
+  if (now - closeArmed > 4000) {
+    closeArmed = now;
+    b.classList.add("armed");
+    b.textContent = "click again to stop";
+    escHint("Click <b>again</b> to stop AstraVigil and close the console.", 4000);
+    setTimeout(() => {
+      if (Date.now() - closeArmed >= 4000) {
+        b.classList.remove("armed");
+        b.textContent = "close console";
+      }
+    }, 4200);
+    return;
+  }
+  closeArmed = 0;
+  b.classList.remove("armed");
+  b.textContent = "stopping…";
+  escHint("Stopping AstraVigil — the camera is being released.", 15000);
+  fetch("/api/kiosk/exit", {method:"POST"}).catch(() => {});
+}
+
 async function kioskRestart() {
   escHint("Restarting the console…", 8000);
   try { await fetch("/api/kiosk/restart", {method:"POST"}); } catch (e) {}
@@ -330,7 +367,7 @@ if (KIOSK) {
     escHits.push(now);
     if (escHits.length >= ESC_NEEDED) {
       escHits = [];
-      escHint("Releasing the display — the sensor keeps running.", 10000);
+      escHint("Stopping AstraVigil — the camera is being released.", 15000);
       fetch("/api/kiosk/exit", {method:"POST"}).catch(() => {});
       return;
     }
