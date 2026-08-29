@@ -54,6 +54,8 @@ RENDERERS = {
     "thermal": lambda res, pipe: render.thermal_view(res),
     "site": lambda res, pipe: render.site_view(res, pipe.site),
     "optical": lambda res, pipe: render.optical_view(res, pipe.H),
+    "optical_site": lambda res, pipe: render.optical_site_view(
+        res, pipe.optical_site),
     "overlay": lambda res, pipe: render.overlay_view(res, pipe.H),
 }
 
@@ -189,7 +191,9 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             "source": pipeline.source.name,
             "warmed_up": pipeline.detector.ready,
             "site": result.site_stats,
+            "optical_site": result.optical_site_stats,
             "cross": result.cross,
+            "cross_log": result.cross_log,
             "learning": result.learning,
             "escalation": result.escalation,
             "alerts": len(result.alerts),

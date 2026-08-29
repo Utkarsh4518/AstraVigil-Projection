@@ -14,14 +14,14 @@ _PAGE = r"""<!doctype html>
     --fg:#e6edf3; --dim:#8b949e;
     --drone:#eb3c3c; --bird:#3caaeb; --unknown:#8b949e; --ok:#3fb950;
     --alert:#f0503c; --watch:#d29922; --nominal:#3fb950; --settled:#c964d6;
-    /* One height for every camera pane, stated rather than derived. Letting
-       each pane's aspect ratio decide its own height made them agree only
-       while the column widths came out exactly proportional, which gaps and
-       rounding do not guarantee - so the row looked ragged. Fixing the height
-       and letting the width follow the column makes them equal by
-       construction; contain then does nothing where the shapes match, and
-       letterboxes a few pixels where they do not. */
-    --view-h:44vh;
+    /* A ceiling on pane height, not a fixed height. Each pane's width comes
+       from a column sized to its own shape, so the heights already agree to
+       within a gap's worth of rounding; the cap only stops a very wide
+       screen turning five panes into five billboards. Stating the height
+       outright looked equal on one monitor and letterboxed on a narrower
+       one, because a fixed height a pane is too narrow to fill is exactly
+       the black bar this was meant to remove. */
+    --view-h:46vh;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -135,7 +135,8 @@ _PAGE = r"""<!doctype html>
      no letterboxing and nothing cropped - the black bars either side of the
      thermal panes were the cost of forcing one 4:3 box on both shapes. */
   .views { display:grid; gap:14px; align-items:stretch;
-           grid-template-columns:__TH_FR__fr __TH_FR__fr __OP_FR__fr __OP_FR__fr; }
+           grid-template-columns:__TH_FR__fr __TH_FR__fr __OP_FR__fr
+                                 __OP_FR__fr __OP_FR__fr; }
   figure { margin:0; background:var(--panel); border:1px solid var(--line);
            border-radius:8px; overflow:hidden;
            display:flex; flex-direction:column; }
@@ -145,12 +146,27 @@ _PAGE = r"""<!doctype html>
      at the edge of frame, which is exactly where something entering the site
      first appears. With the column matched to the image there is nothing left
      to letterbox, so contain costs nothing here. */
-  figure img { flex:none; width:100%; height:var(--view-h);
+  figure img { flex:none; width:100%; height:auto;
+               max-height:var(--view-h);
                object-fit:contain; display:block; background:#000; }
   figure.thermal img { aspect-ratio:__TH_ASPECT__; }
   figure.optical img { aspect-ratio:__OP_ASPECT__; }
   figcaption { flex:1; padding:8px 12px; font-size:12px; color:var(--dim);
                border-top:1px solid var(--line); }
+
+  .trail { background:var(--panel); border:1px solid var(--line);
+           border-radius:8px; padding:6px 10px; margin-bottom:14px;
+           max-height:190px; overflow-y:auto; }
+  .trail .row { display:grid; grid-template-columns:150px 1fr 1fr 54px;
+                gap:10px; padding:5px 0; font-size:12px;
+                border-bottom:1px solid var(--line); align-items:baseline; }
+  .trail .row:last-child { border-bottom:0; }
+  .trail .dirn { color:var(--dim); text-transform:uppercase;
+                 letter-spacing:.06em; font-size:10px; }
+  .trail .q { color:var(--fg); }
+  .trail .a { color:var(--dim); }
+  .trail .t { text-align:right; font-variant-numeric:tabular-nums; }
+  .trail .empty { color:var(--dim); margin:6px 0; }
 
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
        color:var(--dim); margin:26px 0 8px; display:flex; gap:10px;
@@ -280,11 +296,21 @@ _PAGE = r"""<!doctype html>
       <figcaption>Optical — thermal detections mapped through the homography.</figcaption>
     </figure>
     <figure class="optical">
+      <img src="/stream/optical_site" alt="optical site">
+      <figcaption>Optical site model — green is how much history a cell has,
+        and so how much its opinion is worth. Magenta has looked wrong long
+        enough to be an object; amber is off baseline right now. This is the
+        half that sees what has no heat signature at all.</figcaption>
+    </figure>
+    <figure class="optical">
       <img src="/stream/overlay" alt="overlay">
       <figcaption>Overlay — thermal warped into optical space. Hot regions should
         sit on things that are actually hot; if they drift, recalibrate.</figcaption>
     </figure>
   </div>
+
+  <h2>Cross-cue — what each camera asked the other</h2>
+  <div class="trail" id="trail"><p class="empty">nothing asked yet</p></div>
 
   <h2>Tracks</h2>
   <table>
@@ -603,6 +629,27 @@ async function poll() {
         stack.dataset.sig = html;
         stack.innerHTML = html;
       }
+    }
+
+    // The conversation between the two cameras. Question on the left,
+    // answer in the middle, the threat it produced on the right - so the
+    // reason a verdict moved is visible next to the verdict.
+    const trail = document.getElementById("trail");
+    const log = stats.cross_log || [];
+    const thtml = log.length
+      ? log.map(e => `<div class="row">
+           <span class="dirn">${esc(e.dir)}</span>
+           <span class="q">${esc(e.asked)}</span>
+           <span class="a">${esc(e.answered)}</span>
+           <span class="t ${e.threat >= 0.75 ? "lv-alert"
+                            : e.threat >= 0.4 ? "lv-watch" : ""}"
+             >${fmt(e.threat, 2)}</span>
+         </div>`).join("")
+      : '<p class="empty">nothing asked yet — both cameras need something to '
+        + 'disagree about, and a calibration to compare through</p>';
+    if (trail.dataset.sig !== thtml) {
+      trail.dataset.sig = thtml;
+      trail.innerHTML = thtml;
     }
 
     const body = document.getElementById("rows");

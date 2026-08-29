@@ -26,6 +26,7 @@ Everything is associated BEFORE assessment, not after. One aircraft seen by
 both sensors and by both thermal paths is one object and one alert - anything
 else rebuilds the wall of separate alarms the brief exists to complain about.
 """
+import collections
 import time
 
 import numpy as np
@@ -46,11 +47,16 @@ from .site_intelligence.baseline import MIN_LEARNED_FRAMES
 from .tracking.tracker import Tracker
 
 
+# How many cross-cue exchanges the trail remembers. Enough to read the recent
+# conversation at a glance, few enough that it stays a glance.
+CROSS_LOG_MAX = 14
+
+
 class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
                  "healthy", "assessments", "alerts", "static_anomalies",
-                 "site_stats", "optical_site_stats", "novelty", "optical_detections",
+                 "site_stats", "optical_site_stats", "cross_log", "novelty", "optical_detections",
                  "optical_evidence", "cross", "optical_roi", "learning",
                  "identifications", "escalation")
 
@@ -139,6 +145,13 @@ class Pipeline:
         # size and nothing here knows it until one arrives.
         self.optical_site = None
         self._optical_tick = 0
+        # The last few questions one camera asked the other, newest first.
+        #
+        # The cross-cue counters say two exchanges happened. They do not say
+        # what was asked, what came back, or whether it changed the verdict -
+        # which is the entire argument for having two sensors, and until now
+        # the one part of it nobody could see.
+        self.cross_log = collections.deque(maxlen=CROSS_LOG_MAX)
         self.dwell = DwellMonitor()
         self.alerts = alerts if alerts is not None else AlertManager()
         self.frame_index = 0
@@ -206,6 +219,46 @@ class Pipeline:
             out["progress"] = round(min(elapsed / max(target, 1e-6), cov), 3)
             out["done"] = elapsed >= target
         return out
+
+    def _note_cross(self, direction, key, label, asked, answered, threat):
+        self.cross_log.appendleft({
+            "dir": direction, "key": key, "label": label,
+            "asked": asked, "answered": answered,
+            "threat": round(float(threat), 2),
+            "frame": self.frame_index,
+        })
+
+    @staticmethod
+    def _optical_answer(ev):
+        """What optical said back, in words rather than fields."""
+        if ev is None:
+            return "not asked"
+        if not ev.found:
+            return ev.reason or "nothing there"
+        shape = (f"solidity {ev.solidity:.2f}, aspect {ev.aspect:.2f}, "
+                 f"{int(ev.pixels)} px")
+        if ev.label and ev.label != "unknown":
+            return f"looks like {ev.label} ({ev.confidence:.2f}) - {shape}"
+        return f"shape unclear - {shape}"
+
+    @staticmethod
+    def _thermal_answer(ev):
+        """What thermal said back. It cannot name a thing, only measure it.
+
+        Worth spelling out in the trail rather than hiding: an operator
+        reading "nothing warm here" next to an optical contact that has not
+        moved in a minute is looking at the exact signature of a cold-soaked
+        airframe, and the interface should let them see that reasoning.
+        """
+        if ev is None:
+            return "not asked"
+        if not ev.found:
+            return ev.reason or "outside the thermal field of view"
+        if ev.warm:
+            return (f"warm - {ev.peak_c:.1f} C peak, {ev.contrast_c:+.1f} C "
+                    f"above surroundings")
+        return (f"NOT warm - {ev.peak_c:.1f} C peak, only "
+                f"{ev.contrast_c:+.1f} C above surroundings")
 
     def _save_calibration(self, H):
         """Write the learned homography out, so the next run starts with it.
@@ -353,6 +406,12 @@ class Pipeline:
                     when=now)
             a = assess_track(det, tr, novelty, dwell_s, optical_ev,
                              judgement=judgement)
+            if optical_ev is not None:
+                self._note_cross(
+                    "thermal asks optical", a.key, a.label,
+                    f"warm mover, {det.peak_c:.1f} C peak, "
+                    f"{det.contrast_c:+.1f} C above background - what is it?",
+                    self._optical_answer(optical_ev), a.threat)
             self._maybe_escalate(a, det, tr, res, optical_ev)
             assessments.append(a)
 
@@ -370,8 +429,14 @@ class Pipeline:
             if th.warm:
                 confirmed += 1
             key = self.optical_contacts.key_for(odet.centroid)
-            assessments.append(
-                assess_optical_only(odet, th, key, dwells.get(key, 0.0)))
+            oa = assess_optical_only(odet, th, key, dwells.get(key, 0.0))
+            assessments.append(oa)
+            dwell = dwells.get(key, 0.0)
+            self._note_cross(
+                "optical asks thermal", key, oa.label,
+                f"something here thermal never claimed, still for "
+                f"{dwell:.0f} s - is it warm?",
+                self._thermal_answer(th), oa.threat)
 
         assessments.sort(key=lambda a: a.threat, reverse=True)
 
@@ -397,6 +462,7 @@ class Pipeline:
         res.site_stats = self.site.stats()
         res.optical_site_stats = (self.optical_site.stats()
                                   if self.optical_site is not None else None)
+        res.cross_log = list(self.cross_log)
         res.learning = self.learning_status()
         res.identifications = {
             a.key: self.escalator.result_for(a.key).as_dict()

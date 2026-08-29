@@ -22,6 +22,8 @@ import cv2
 import numpy as np
 
 from ..calibration import homography
+from ..site_intelligence.optical_baseline import (
+    MIN_LEARNED_FRAMES, Z_ANOMALOUS)
 from ..utils.env import env_int
 
 # How the thermal camera is mounted, in 90-degree anticlockwise steps applied
@@ -371,6 +373,74 @@ def site_view(result, site, scale=2):
     _banner(img, f"SITE {state}  scene {s['scene_maturity']*100:.0f}%  "
                  f"activity {s['activity_maturity']*100:.0f}%  "
                  f"off-baseline cells {s['anomalous_cells']}")
+    return img
+
+
+def optical_site_view(result, site, scale=1):
+    """What the OPTICAL camera has learned about this place.
+
+    The mirror of site_view. That pane shows which cells are at a temperature
+    the thermal camera did not expect; this one shows which cells do not look
+    the way the optical camera has learned they look.
+
+    It exists because the model was working invisibly. A baseline nobody can
+    inspect is one nobody has reason to trust - the same argument that put the
+    thermal site pane on the screen - and this half is the one that sees the
+    object with no heat signature at all.
+
+    Green is coverage: how much history a cell has, and therefore how much its
+    opinion is worth. Magenta is a cell that has looked wrong for long enough
+    to be an object rather than someone walking past.
+    """
+    if result.optical is None:
+        return None
+    img = result.optical.copy()
+    if site is None:
+        img = _rot_image(img, OPTICAL_VIEW_ROT)
+        _banner(img, "OPTICAL SITE - no optical frame learned yet")
+        return img
+
+    h, w = img.shape[:2]
+
+    # Green: learned coverage. Square-rooted for the same reason the thermal
+    # pane does it - a corner with a little history should still be visible
+    # next to the middle of the frame, which has all of it.
+    cover = np.clip(site.ref_n / max(MIN_LEARNED_FRAMES, 1), 0, 1)
+    cover = cv2.resize(np.sqrt(cover), (w, h),
+                       interpolation=cv2.INTER_NEAREST)
+    green = np.zeros_like(img)
+    green[:, :, 1] = (cover * 190).astype(np.uint8)
+    img = cv2.addWeighted(img, 1.0, green, 0.45, 0)
+
+    # Magenta outline: cells that have been off baseline long enough to be an
+    # object. Outlined rather than filled, so what is underneath stays
+    # readable - the operator needs to see WHAT is sitting there.
+    settled = cv2.resize(
+        (site.persist >= site.persist_frames).astype(np.uint8), (w, h),
+        interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(settled, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, COL_SETTLED, 2)
+
+    # Amber outline: off baseline right now, but not for long enough to
+    # count. Movement in progress rather than something that has arrived.
+    live = cv2.resize((site.z_map() > Z_ANOMALOUS).astype(np.uint8), (w, h),
+                      interpolation=cv2.INTER_NEAREST)
+    live = cv2.subtract(live, settled)
+    contours, _ = cv2.findContours(live, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(img, contours, -1, COL_WATCH, 1)
+
+    img = _rot_image(img, OPTICAL_VIEW_ROT)
+    if scale != 1:
+        img = cv2.resize(img, (img.shape[1] * scale, img.shape[0] * scale),
+                         interpolation=cv2.INTER_NEAREST)
+
+    st = site.stats()
+    state = "LEARNING" if st["learning"] else "LEARNED"
+    _banner(img, f"OPTICAL SITE {state}  scene {st['maturity'] * 100:.0f}%  "
+                 f"off-baseline {st['anomalous_cells']}  "
+                 f"settled {st['settled_cells']}")
     return img
 
 
