@@ -45,6 +45,23 @@ BASE_URL = os.environ.get("FEATHERLESS_BASE_URL",
                           "https://api.featherless.ai/v1")
 DEFAULT_MODEL = os.environ.get("FEATHERLESS_MODEL",
                                "Qwen/Qwen2.5-VL-7B-Instruct")
+
+# The API sits behind Cloudflare, which blocks requests by client signature.
+# urllib identifies itself as "Python-urllib/3.x" by default, and that
+# signature is refused: the reply is HTTP 403 carrying "error code: 1010",
+# Cloudflare's "banned by browser signature", NOT anything Featherless said
+# about the key or the model. Sending a real name is the whole fix.
+#
+# Overridable because a WAF rule is a moving target and the alternative to
+# changing this string would be editing the source on the rig.
+USER_AGENT = os.environ.get("FEATHERLESS_USER_AGENT", "AstraVigil/1.0")
+
+
+def _headers(api_key):
+    return {"Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+            "Authorization": f"Bearer {api_key}"}
 TIMEOUT_S = 45.0
 COOLDOWN_S = 60.0          # per object, so one track cannot spam the API
 MIN_GAP_S = 6.0            # global floor between any two calls
@@ -201,8 +218,7 @@ class FeatherlessClient:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
+            headers=_headers(self.api_key),
             method="POST")
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             body = json.loads(r.read().decode())
@@ -220,8 +236,7 @@ class FeatherlessClient:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"},
+            headers=_headers(self.api_key),
             method="POST")
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             body = json.loads(r.read().decode())

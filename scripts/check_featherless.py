@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from astravigil.llm.featherless import (  # noqa: E402
-    BASE_URL, DEFAULT_MODEL)
+    BASE_URL, DEFAULT_MODEL, USER_AGENT, _headers)
 
 ENV_FILE = os.environ.get("ASTRAVIGIL_ENV",
                           os.path.expanduser("~/.astravigil.env"))
@@ -97,40 +97,92 @@ def check_key_string(key):
     return problems
 
 
+def _cloudflare_code(body):
+    """Cloudflare's own error number, if this is Cloudflare talking.
+
+    Worth separating out because these arrive as ordinary 403s and read like
+    an answer about the key when they are not an answer from the API at all.
+    """
+    low = body.lower()
+    if "error code:" not in low and "cloudflare" not in low:
+        return None
+    for code, what in (
+            ("1010", "the request was refused on its client signature "
+                     "(User-Agent), before it reached the API"),
+            ("1020", "an access rule refused the request"),
+            ("1015", "rate limited by the edge, not by the API"),
+            ("1006", "the client IP is banned at the edge")):
+        if code in body:
+            return code, what
+    return "?", "the request was stopped at the edge, not by the API"
+
+
+def _request(url, key, payload=None, timeout=30.0):
+    """Returns (status, body_text). Never raises for an HTTP status."""
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, headers=_headers(key),
+        method="POST" if data else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except urllib.error.URLError as exc:
+        return None, str(exc.reason)
+
+
+def _explain(status, body, model):
+    cf = _cloudflare_code(body)
+    if cf is not None:
+        code, what = cf
+        return (f"HTTP {status}, but this is CLOUDFLARE error {code}, not "
+                f"Featherless:\n         {what}.\n         The key was never "
+                f"judged. Try a different FEATHERLESS_USER_AGENT "
+                f"(currently {USER_AGENT!r}).")
+    meaning = {
+        400: "bad request - usually the model id, not the key",
+        401: "the key was rejected - wrong, revoked, or not yet active",
+        402: "the key is valid but the account cannot pay for this call",
+        403: "the key is valid but not permitted to use this model",
+        404: f"no such model: {model}",
+        429: "rate limited - the key IS valid",
+    }.get(status, "")
+    return f"HTTP {status}  {meaning}\n         {body[:300]}"
+
+
 def live_call(key, model, timeout=30.0):
-    """Spend one cheap call. Returns (ok, detail)."""
+    """Prove the key authenticates, then that the model is usable.
+
+    Two calls, because one cannot separate them. A chat completion that fails
+    with 403 might mean the key is bad, the model is not on the plan, or the
+    request never arrived - and the operator needs to know which.
+    """
+    base = BASE_URL.rstrip("/")
+
+    status, body = _request(f"{base}/models", key, timeout=timeout)
+    if status is None:
+        return False, f"could not reach {BASE_URL} ({body})"
+    if status != 200:
+        return False, "listing models: " + _explain(status, body, model)
+    print(f"{OK} the key authenticates (GET /models -> 200)")
+
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "reply with the word ok"}],
         "max_tokens": 5,
         "temperature": 0.0,
     }
-    req = urllib.request.Request(
-        f"{BASE_URL.rstrip('/')}/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {key}"},
-        method="POST")
+    status, body = _request(f"{base}/chat/completions", key, payload, timeout)
+    if status is None:
+        return False, f"could not reach {BASE_URL} ({body})"
+    if status != 200:
+        return False, f"calling {model}: " + _explain(status, body, model)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = json.loads(r.read().decode())
-        reply = body["choices"][0]["message"]["content"].strip()
-        return True, f"HTTP 200, model answered {reply!r}"
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300].replace("\n", " ")
-        meaning = {
-            400: "bad request - usually the model id, not the key",
-            401: "the key was rejected - wrong, revoked, or not yet active",
-            402: "the key is valid but the account cannot pay for this call",
-            403: "the key is valid but not permitted to use this model",
-            404: f"no such model: {model}",
-            429: "rate limited - the key IS valid",
-        }.get(exc.code, "")
-        return False, f"HTTP {exc.code}  {meaning}\n         {detail}"
-    except urllib.error.URLError as exc:
-        return False, f"could not reach {BASE_URL} ({exc.reason})"
+        reply = json.loads(body)["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, ValueError) as exc:
         return False, f"unexpected reply shape ({exc})"
+    return True, f"HTTP 200, model answered {reply!r}"
 
 
 def main():
@@ -203,6 +255,7 @@ def main():
     model = args.model or os.environ.get("FEATHERLESS_MODEL", DEFAULT_MODEL)
     print(f"\nendpoint   : {BASE_URL}")
     print(f"model      : {model}")
+    print(f"user-agent : {USER_AGENT}")
 
     if not args.live:
         print(f"\n{MEH} not checked against the API. Presence is not validity "
