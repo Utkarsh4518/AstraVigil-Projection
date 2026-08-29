@@ -59,14 +59,45 @@ splash() {
     log "$1"
 }
 
-# Single instance, checked after the helpers above because it uses them.
-# Double-clicking the icon twice must not race two pipelines onto one camera.
+# Single instance: double-clicking the icon twice must not race two pipelines
+# onto one camera.
+#
+# But "another instance holds the lock" is not the same as "there is nothing
+# to do". The normal state after an escape is pipeline still running - on
+# purpose, a perimeter sensor should not go blind because somebody wanted the
+# desktop back - with the console closed. Double-clicking the icon then means
+# "give me the console back", and answering "already running" is useless: it
+# names the state instead of doing the obvious thing about it.
+already_up() { curl -fsS --max-time 2 "http://localhost:${PORT}/api/state" >/dev/null 2>&1; }
+browser_alive() {
+    local pid
+    pid="$(cat "$BROWSER_PID_FILE" 2>/dev/null)" || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 mkdir -p "$RUN_DIR"
 exec 9>"$LOCK"
+REATTACH=0
 if ! flock -n 9; then
-    log "already running - not starting a second instance"
-    notify "AstraVigil is already running."
-    exit 0
+    if browser_alive; then
+        log "console already open - nothing to do"
+        notify "The AstraVigil console is already open.
+
+If you cannot see it, it may be on another virtual console - try Ctrl+Alt+F7.
+To close it:  $REPO/deploy/stop-kiosk.sh"
+        exit 0
+    fi
+    if already_up; then
+        # Sensor up, console closed. Reopen the console and nothing else: the
+        # lock exists to stop two pipelines fighting over one camera, and
+        # opening a browser does not do that.
+        log "pipeline already running - reopening the console only"
+        REATTACH=1
+    else
+        log "another instance is mid-startup"
+        notify "AstraVigil is still starting - give it a moment."
+        exit 0
+    fi
 fi
 
 die() {
@@ -100,7 +131,11 @@ log "repo=$REPO python=$PY browser=$BROWSER port=$PORT"
 # take tens of seconds on a Pi 4, and a desktop icon that produces no visible
 # response gets double-clicked again - which the lock then refuses with a
 # confusing "already running".
-splash "Starting the sensor - the console will open fullscreen shortly." 12000
+if [ "$REATTACH" -eq 1 ]; then
+    splash "Reopening the console - the sensor never stopped." 6000
+else
+    splash "Starting the sensor - the console will open fullscreen shortly." 12000
+fi
 
 # ------------------------------------------------------------- dashboard
 # Supervised in a subshell: if the console asks to restart, the pipeline exits
@@ -124,8 +159,6 @@ start_dashboard() {
     ) &
     echo $! >"$DASH_PID_FILE"
 }
-
-already_up() { curl -fsS --max-time 2 "http://localhost:${PORT}/api/state" >/dev/null 2>&1; }
 
 if already_up; then
     log "pipeline already listening on $PORT - attaching to it"

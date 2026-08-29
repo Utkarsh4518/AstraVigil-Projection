@@ -46,8 +46,14 @@ if [ "$ALL" -eq 1 ]; then
         rm -f "$RUN_DIR/dashboard.pid"
     fi
     pkill -f "scripts/run_dashboard.py" 2>/dev/null && say "stopped the pipeline"
+    # The launcher itself holds the single-instance lock. Leaving it alive is
+    # what makes the next double-click answer "already running" when nothing
+    # is actually running any more.
+    pkill -f "astravigil-kiosk.sh" 2>/dev/null && say "stopped the launcher"
+    rm -f "$RUN_DIR/kiosk.lock"
     say ""
     say "Everything stopped. The site is no longer being watched."
+    say "Double-click the AstraVigil icon to start again."
 else
     if curl -fsS --max-time 2 "http://localhost:${PORT}/api/state" >/dev/null 2>&1; then
         say ""
