@@ -2,6 +2,8 @@
 # Everything the driver needs to know about the hardware lives here, so the
 # tuning knobs that differ between boards sit in one file.
 
+import os
+
 # USB identity. The same on every board - the driver finds the camera by
 # VID/PID, never by /dev/video* path, so port order and enumeration order
 # do not matter.
@@ -72,8 +74,15 @@ HEADER_ERR = 0x40    # camera flagged this payload as bad
 # pyusb per frame, 25 times a second. Doubling the chunk halves that.
 # If your kernel returns short reads or the stream turns unreliable, drop
 # READ_CHUNK_BYTES back to 16384 - that is the value the Pi 5 rig used.
-READ_CHUNK_BYTES = 32768
-READ_TIMEOUT_MS = 200
+#
+# REVERTED to 16384. Doubling it was an untested guess that measured fine over
+# USB/IP on a laptop and does not belong on the value the Pi 5 rig actually
+# proved. The Pi's own USB stack is not the one that was measured, and a
+# streaming driver is the wrong place to carry an optimisation nobody has run
+# on the target board. Override to experiment; do not change the default
+# without a Pi in front of you.
+READ_CHUNK_BYTES = int(os.environ.get("ASTRAVIGIL_READ_CHUNK", "16384"))
+READ_TIMEOUT_MS = int(os.environ.get("ASTRAVIGIL_READ_TIMEOUT_MS", "200"))
 
 # Reads time out constantly in normal running, so a handful of failures in a
 # row mean nothing. Only complain once it is clearly stuck.

@@ -130,10 +130,26 @@ class HardwareSource(Source):
 
         from .drivers.thermal import ThermalStream
         self.stream = ThermalStream()
-        if not self.stream.start(wait_s=5.0):
+        # Cold Pi 4: opening the device, committing the format and getting the
+        # first frame out is not instant, and 5 s was tight enough to fail on
+        # hardware that then worked fine by hand.
+        wait_s = float(os.environ.get("ASTRAVIGIL_THERMAL_WAIT_S", "12"))
+        if not self.stream.start(wait_s=wait_s):
+            # Stop the capture thread BEFORE raising. It is holding the USB
+            # device; letting the exception escape leaves it running, and the
+            # interpreter then tears a daemon thread down in the middle of a
+            # libusb call. That aborts the process
+            # ("libusb_ref_device: Assertion `refcnt >= 2' failed"), which
+            # skips cleanup and leaves the camera claimed by a dead process -
+            # so every later attempt fails too, and the original cause is
+            # buried under a crash that looks unrelated.
+            self.stream.stop()
             raise RuntimeError(
-                "thermal camera did not produce a frame - check "
-                "docs/pi4_thermal_bringup.md")
+                f"thermal camera opened but produced no frame within "
+                f"{wait_s:.0f} s.\n"
+                f"  Try:  python3 scripts/thermal_probe.py 20\n"
+                f"  If that works, raise ASTRAVIGIL_THERMAL_WAIT_S.\n"
+                f"  If it does not, see docs/pi4_thermal_bringup.md")
 
         self.swap_rb = swap_rb
         self.picam = None
