@@ -37,6 +37,15 @@ _PAGE = r"""<!doctype html>
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
          background:var(--ok); margin-right:6px; }
   .dot.warn { background:var(--watch); }
+
+  /* The uplink light. Four states, not two: three of the ways this fails
+     leave the internet working perfectly and only the identification service
+     broken, and an operator told "offline" would go and check a cable that
+     has nothing wrong with it. */
+  .dot.net-ok { background:var(--ok); }
+  .dot.net-auth, .dot.net-busy { background:var(--watch); }
+  .dot.net-down { background:var(--alert); }
+  .dot.net-unknown { background:var(--dim); }
   main { padding:16px 20px 32px; }
 
   /* --- alerts ------------------------------------------------------- */
@@ -256,6 +265,9 @@ _PAGE = r"""<!doctype html>
     <span class="stat"><span class="tag">tracks</span> <b id="tracks">—</b></span>
     <span class="stat"><span class="tag">cross-cue</span> <b id="cross">—</b></span>
     <span class="stat"><span class="tag">frame</span> <b id="frame">—</b></span>
+    <span class="stat" id="netstat" title="Checking the uplink…">
+      <span class="dot net-unknown" id="net"></span><span id="nettxt">uplink</span>
+    </span>
     <button id="learnbtn" class="learnbtn" onclick="toggleLearn()"
             title="Watch the site and build a model of what is normal here">learn this site</button>
     <button class="devonly" onclick="saveSite()" title="Write the learned site model to disk">save site model</button>
@@ -616,6 +628,19 @@ async function poll() {
       ? `${cx.paired_with_thermal ?? 0}\u21c4 ${cx.optical_only ?? 0}opt`
       : "off";
     document.getElementById("frame").textContent = stats.frame ?? "—";
+
+    // The uplink. Says WHICH failure, because "offline" and "your key was
+    // rejected" send somebody to look at two completely different things.
+    const net = (stats.escalation || {}).net || {};
+    const nstate = net.state || "unknown";
+    document.getElementById("net").className = "dot net-" + nstate;
+    document.getElementById("nettxt").textContent = {
+      ok: "online", auth: "key rejected", busy: "service busy",
+      down: "offline", unknown: "checking"}[nstate] || nstate;
+    document.getElementById("netstat").title =
+      (net.detail || "checking the uplink") +
+      (net.latency_ms != null ? ` · ${net.latency_ms} ms` : "") +
+      (net.age_s != null ? ` · checked ${Math.round(net.age_s)}s ago` : "");
     document.getElementById("src").textContent =
       (stats.source ?? "") + (stats.calibrated ? " · calibrated" : " · uncalibrated");
 

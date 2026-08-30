@@ -116,6 +116,21 @@ FIT_EVERY_SAMPLES = 12
 SCENERY_WINDOW = 90          # frames of occupancy history
 SCENERY_FRACTION = 0.85      # occupied at least this often -> scenery
 SCENERY_WARMUP = 30          # frames before any of it is trusted
+
+# Ceiling on correspondences contributed by things that have STOPPED.
+#
+# A moving object offers a new pair every time it moves; a parked one sits in
+# the same place for as long as it is there and would offer the same pair on
+# every frame forever. RANSAC decides by counting agreement, so a single
+# WRONG stationary pair - a warm desk edge lined up with an unrelated bag -
+# repeated a thousand times would out-vote every correct pair in the buffer
+# and the fit would converge confidently on nonsense.
+#
+# So a given (thermal object, optical object) combination contributes exactly
+# once, ever, and the total is capped. That bounds their influence to roughly
+# what a few seconds of movement provides, which is the right weight for
+# evidence that cannot be independently repeated.
+MAX_SETTLED_PAIRS = 40
 THERMAL_CELL_PX = 8
 OPTICAL_CELL_PX = 24
 
@@ -165,6 +180,9 @@ class AutoCalibrator:
         self._o_hist = []
         self._last_added = []
         self._prev_optical_key = None
+        # (thermal key, optical key) combinations already contributed by the
+        # stationary path, so none of them can be counted twice.
+        self._settled_pairs = set()
         self._frame = 0
         # Primed, so the first frame that reaches the minimum fits at once
         # rather than waiting out a throttle interval it has not used. The
@@ -201,6 +219,72 @@ class AutoCalibrator:
         limit = SCENERY_FRACTION * len(history)
         return [d for d in dets
                 if counts.get(self._cell(d.centroid, cell_px), 0) < limit]
+
+    def observe_settled(self, thermal_statics, optical_regions,
+                        thermal_shape):
+        """Correspondences from objects that have stopped moving.
+
+        The motion path needs somebody to walk about, and an operator who has
+        been told to keep moving and is watching a counter refuse to climb has
+        no other lever to pull. Two things that have arrived and settled - a
+        thermal static anomaly and an optical settled patch - are a usable
+        correspondence that costs nobody any walking.
+
+        Deliberately a SUPPLEMENT and not a replacement. Stationary objects
+        cluster wherever they happen to be, so a scene with two of them in one
+        corner still fails the spread test and still needs movement across the
+        view; what this removes is the case where somebody has moved enough,
+        stopped, and the last few pairs never arrive.
+        """
+        if self.H is not None or not thermal_statics or not optical_regions:
+            return None
+        # Busy frames are skipped rather than sampled thinly, exactly as the
+        # motion path does. Every static is paired with every region, so three
+        # of each means nine pairs of which at most three can be right; the
+        # inlier ratio RANSAC has to find falls off a cliff as this grows.
+        if (len(thermal_statics) > MAX_THERMAL_PER_FRAME
+                or len(optical_regions) > MAX_OPTICAL_PER_FRAME):
+            return None
+
+        added = 0
+        for t in thermal_statics:
+            for o in optical_regions:
+                if len(self._settled_pairs) >= MAX_SETTLED_PAIRS:
+                    break
+                pair = (t.key, o.key)
+                if pair in self._settled_pairs:
+                    continue
+                self._settled_pairs.add(pair)
+                self.thermal_pts.append(
+                    tuple(float(v) for v in t.centroid))
+                self.optical_pts.append(
+                    tuple(float(v) for v in o.centroid))
+                added += 1
+        if not added:
+            return None
+
+        # One frame index for the whole call, not one per pair. Counting each
+        # pair as its own frame would let a single instant satisfy the
+        # distinct-frames test, which exists precisely to stop that.
+        self._frame += 1
+        self.frame_of.extend([self._frame] * added)
+        self._trim()
+
+        if len(self.thermal_pts) < max(self.min_inliers, 8):
+            return None
+        spread_ok, note = self.spread(self.thermal_pts, thermal_shape)
+        if not spread_ok:
+            self.reason = note
+            return None
+        self._since_fit = 0
+        return self._try_fit(thermal_shape)
+
+    def _trim(self):
+        excess = len(self.thermal_pts) - self.max_candidates
+        if excess > 0:
+            del self.thermal_pts[:excess]
+            del self.optical_pts[:excess]
+            del self.frame_of[:excess]
 
     def observe(self, thermal_dets, optical_dets, thermal_shape):
         """Feed one frame. Returns a homography the moment one is trusted."""
@@ -264,11 +348,7 @@ class AutoCalibrator:
                 self.optical_pts.append(tuple(float(v) for v in o.centroid))
                 self.frame_of.append(self._frame)
 
-        excess = len(self.thermal_pts) - self.max_candidates
-        if excess > 0:
-            del self.thermal_pts[:excess]
-            del self.optical_pts[:excess]
-            del self.frame_of[:excess]
+        self._trim()
 
         if len(self.thermal_pts) < max(self.min_inliers, 8):
             self.reason = (f"{self.frames_sampled} usable frames, "

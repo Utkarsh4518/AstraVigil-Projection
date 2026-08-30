@@ -319,6 +319,87 @@ def _parse(text):
     return json.loads(t[start:end + 1])
 
 
+# How often the reachability probe runs, and how long it waits. A GET on the
+# models endpoint costs no tokens and returns in well under a second on a live
+# link, so this is cheap; the interval is long because what it answers -
+# "could we reach the outside world" - does not change 25 times a second.
+PROBE_EVERY_S = 30.0
+PROBE_TIMEOUT_S = 6.0
+
+
+class NetworkMonitor:
+    """Is the outside world reachable, and does it accept our key?
+
+    A single green/red light would be a lie in the most common failure. Three
+    of the four states this reports are situations where the internet is
+    perfectly fine and the identification service is not - a rejected key, a
+    saturated model - and an operator told "offline" would go and check a
+    cable that has nothing wrong with it. So the state carries WHY.
+
+    Runs on its own daemon thread and is read with a plain attribute load.
+    Nothing here may ever block the capture loop: the pipeline must behave
+    identically whether this says ok or down, which is the same rule the
+    escalator follows.
+    """
+
+    def __init__(self, client, every_s=PROBE_EVERY_S, start=True):
+        self.client = client
+        self.every_s = float(every_s)
+        self.state = "unknown"
+        self.detail = "not probed yet"
+        self.checked_at = 0.0
+        self.latency_ms = None
+        self._stop = threading.Event()
+        if start:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def status(self):
+        return {"state": self.state, "detail": self.detail,
+                "latency_ms": self.latency_ms,
+                "age_s": (round(time.time() - self.checked_at, 1)
+                          if self.checked_at else None)}
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self.probe()
+            self._stop.wait(self.every_s)
+
+    def probe(self):
+        """One reachability check. Safe to call from anywhere."""
+        url = self.client.base_url.rstrip("/") + "/models"
+        req = urllib.request.Request(
+            url, headers=_headers(self.client.api_key or "none"),
+            method="GET")
+        t0 = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as r:
+                r.read(1)
+            self._set("ok", "reachable, key accepted", t0)
+        except urllib.error.HTTPError as exc:
+            # The request ARRIVED. Whatever the answer was, the link is up,
+            # and saying otherwise would send somebody to look at a router.
+            if exc.code in (401, 403):
+                self._set("auth", f"online, but the key was rejected "
+                                  f"(HTTP {exc.code})", t0)
+            elif exc.code in (408, 429, 500, 502, 503, 504):
+                self._set("busy", f"online, service unavailable "
+                                  f"(HTTP {exc.code})", t0)
+            else:
+                self._set("ok", f"reachable (HTTP {exc.code})", t0)
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            self._set("down", f"no route to the internet ({reason})", t0)
+
+    def _set(self, state, detail, t0):
+        self.latency_ms = round(1000.0 * (time.monotonic() - t0))
+        self.state = state
+        self.detail = detail
+        self.checked_at = time.time()
+
+
 class Escalator:
     """Queues identification requests and runs them off the hot path."""
 
@@ -336,6 +417,10 @@ class Escalator:
         self._lock = threading.Lock()
         self.calls = 0
         self.failures = 0
+        # Watched whether or not escalation is switched on. An operator wants
+        # to know the link is up before they turn anything on, and finding out
+        # only at the moment a drone needs identifying is finding out too late.
+        self.net = NetworkMonitor(self.client)
         if self.enabled:
             threading.Thread(target=self._worker, daemon=True).start()
 
@@ -345,7 +430,8 @@ class Escalator:
                 "model": self.client.model,
                 "calls": self.calls, "failures": self.failures,
                 "pending": len(self.pending),
-                "results": len(self.results)}
+                "results": len(self.results),
+                "net": self.net.status()}
 
     def should_ask(self, key, now=None):
         if not self.enabled:

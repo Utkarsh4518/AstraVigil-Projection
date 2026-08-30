@@ -52,6 +52,18 @@ from .tracking.tracker import Tracker
 # conversation at a glance, few enough that it stays a glance.
 CROSS_LOG_MAX = 14
 
+# Seconds an unidentifiable, cold, stationary optical contact must persist
+# before it is worth an API call.
+#
+# The escalation trigger for a thermal track is threat, which is right: a
+# warm mover scoring high is a hard case and a bigger model may name it. It
+# is the WRONG trigger for the one object this system exists to catch. A
+# drone that has landed and gone cold has no heat, no motion and no
+# classifier output, so nothing local can push its threat up quickly - and by
+# the time dwell alone has, minutes have passed. Cold, still, and unnameable
+# is itself the signature, so it gets its own trigger.
+ESCALATE_COLD_DWELL_S = 20.0
+
 
 class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
@@ -465,6 +477,8 @@ class Pipeline:
                 f"something here thermal never claimed, still for "
                 f"{dwell:.0f} s - is it warm?",
                 self._thermal_answer(th), oa.threat)
+            self._maybe_escalate_optical(oa, odet.box, res, th,
+                                         "optical-only contact")
 
         # Uncalibrated: nothing above ran, because every one of those paths
         # needs a homography to know where thermal is looking. The contacts
@@ -494,6 +508,27 @@ class Pipeline:
                                                           mapped)
             for r in optical_regions:
                 self.cues.number(r.key, now)
+                # A settled patch had no verdict at all until now: it was
+                # drawn, numbered, and then dropped. That left the cold-soaked
+                # airframe - the case this whole optical half was built for -
+                # visible on a pane and absent from every alert.
+                #
+                # OpticalRegion carries box, centroid, key and dwell_s, which
+                # is all assess_optical_only reads, so the reverse-cue verdict
+                # already written for a moving optical contact applies here
+                # unchanged. Its threat climbs with persistence, which is
+                # exactly the evidence a stationary object has to offer.
+                th = (verify_thermal(res.thermal_c, self.H, r.box)
+                      if self.H is not None else None)
+                ra = assess_optical_only(r, th, r.key, r.dwell_s)
+                assessments.append(ra)
+                self._note_cross(
+                    "optical asks thermal", r.key, ra.label,
+                    f"this patch has not looked right for {r.dwell_s:.0f} s "
+                    f"and nothing moved - is anything warm there?",
+                    self._thermal_answer(th), ra.threat)
+                self._maybe_escalate_optical(ra, r.box, res, th,
+                                             "settled optical patch")
 
         # Number everything on screen, then release the numbers of things
         # that have been gone a while. Pruning after the refresh, never
@@ -529,6 +564,17 @@ class Pipeline:
         res.cross_log = list(self.cross_log)
         res.cue_numbers = self.cues.snapshot()
         res.optical_cues = optical_cues
+        # Stationary correspondences, for an operator who has moved about,
+        # stopped, and is watching the pair counter sit short of the minimum.
+        if (self.autocal is not None and self.H is None
+                and optical_regions and statics):
+            H_new = self.autocal.observe_settled(statics, optical_regions,
+                                                 res.thermal_c.shape)
+            if H_new is not None:
+                self.H = H_new
+                self._roi_set = False
+                self._save_calibration(H_new)
+
         res.optical_regions = optical_regions
         res.learning = self.learning_status()
         res.identifications = {
@@ -582,6 +628,68 @@ class Pipeline:
         esc.ask(key, features,
                 thermal_crop=self._thermal_crop(res, det),
                 optical_crop=self.crop_optical(det, margin=12))
+
+    def _maybe_escalate_optical(self, assessment, box, res, thermal_check,
+                                note):
+        """Ask a bigger model about something only the optical camera has.
+
+        The existing escalation path runs inside the thermal detection loop
+        and takes a thermal detection, so an optical contact could never
+        reach it however strange it looked. The box here is in OPTICAL pixels
+        and no homography is required, which matters: this has to work on an
+        uncalibrated rig, where optical is the only sensor saying anything.
+
+        Two triggers rather than one. Threat, as everywhere else - and cold,
+        still and unidentified, which is the signature of the parked airframe
+        and never produces a high local threat quickly enough to be useful.
+        """
+        esc = self.escalator
+        if not esc.enabled or res.optical is None:
+            return
+        cold_and_still = (thermal_check is not None and thermal_check.found
+                          and not thermal_check.warm
+                          and assessment.dwell_s >= ESCALATE_COLD_DWELL_S)
+        if assessment.threat < self.escalate_at and not cold_and_still:
+            return
+        if not esc.should_ask(assessment.key):
+            return
+
+        x, y, w, h = [int(v) for v in box]
+        features = {
+            "sensor": "optical only - this object has no thermal detection",
+            "why_asked": note,
+            "box": [x, y, w, h],
+            "area_px": int(w * h),
+            "aspect": round(w / max(h, 1), 2),
+            "dwell_s": round(assessment.dwell_s, 1),
+            "threat": round(assessment.threat, 3),
+            "thermal_says": self._thermal_answer(thermal_check),
+            "range_note": (
+                "A stationary object with no heat signature that has been "
+                "in place for a while is either scene clutter or an airframe "
+                "that has landed and cooled to ambient. Shape is the only "
+                "thing left to tell them apart."),
+        }
+        esc.ask(assessment.key, features, thermal_crop=None,
+                optical_crop=self._optical_patch(res, box))
+
+    @staticmethod
+    def _optical_patch(res, box, margin=16):
+        """Crop of the optical frame around an OPTICAL-space box.
+
+        crop_optical() maps a thermal box through the homography; this is for
+        objects that were found in the optical frame to begin with and must
+        not require a calibration to be sent anywhere.
+        """
+        if res.optical is None:
+            return None
+        h, w = res.optical.shape[:2]
+        x, y, bw, bh = [int(v) for v in box]
+        x0, y0 = max(0, x - margin), max(0, y - margin)
+        x1, y1 = min(w, x + bw + margin), min(h, y + bh + margin)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return res.optical[y0:y1, x0:x1].copy()
 
     @staticmethod
     def _thermal_crop(res, det, margin=6, pad_c=None):
