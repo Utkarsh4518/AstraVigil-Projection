@@ -58,6 +58,16 @@ DEFAULT_VIEW_FPS = 6.0
 # which matters because the rig is not the machine this is written on.
 RENDER_SHARE = env_float("ASTRAVIGIL_RENDER_SHARE", 0.25)
 
+# Seconds between profile lines on the console. 0 turns them off.
+#
+# A tooltip is the wrong place for this. Twice now a frame rate has been
+# diagnosed from a screenshot of a summary and twice the guess was wrong -
+# once at the wrong stage entirely, once at a stage that profiles at a
+# millisecond. The machine with the problem is the only one that can answer
+# where its time goes, and the answer has to be somewhere a person can copy
+# out of a terminal without being asked to hover over anything.
+PROFILE_EVERY_S = env_float("ASTRAVIGIL_PROFILE_EVERY_S", 20.0)
+
 # Exit code the launcher script watches for to mean "start me again".
 RESTART_EXIT_CODE = 42
 
@@ -157,6 +167,7 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
     view_period = 1.0 / view_fps if view_fps > 0 else None
     ticks = []
     last = None
+    last_profile = time.monotonic()
     last_render = 0.0
     render_ms = 0.0
     rendered = []
@@ -286,6 +297,22 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             a["cue"] = result.cue_numbers.get(a["key"])
         state.publish_data(dets, [a.as_dict() for a in result.assessments],
                            alerts, stats)
+
+        # --- say where the time went, on the machine that knows
+        if PROFILE_EVERY_S > 0 and t0 - last_profile >= PROFILE_EVERY_S:
+            last_profile = t0
+            parts = " ".join(f"{k} {v}" for k, v in
+                             sorted(result.stage_ms.items(),
+                                    key=lambda kv: -kv[1]))
+            th = _thermal_health(pipeline)
+            print(f"profile: fps {stats['fps']}  proc {stats['proc_ms']} "
+                  f"capture {stats['capture_ms']} draw {stats['render_ms']}"
+                  f" every {stats.get('render_every_s')}s"
+                  f"  | {parts}"
+                  + (f"  | thermal {th['good_pct']}% of {th['frames']}"
+                     if th else "")
+                  + f"  | views {','.join(rendered) or 'none'}",
+                  flush=True)
 
         rest = period - (time.monotonic() - t0)
         if rest > 0:

@@ -56,6 +56,22 @@ import numpy as np
 # the frame.
 CELL_PX = 32
 
+# NOT reduced. 1.0, and the failed attempt is worth recording.
+#
+# Halving each side before the Sobel looked free - this model only wants one
+# mean gradient per 32-pixel cell, so the reasoning went, and half-resolution
+# gradients average to the same thing. They do not. INTER_AREA before a
+# Sobel changes the gradient distribution enough to break the property this
+# whole file is built on: a 45% dimming of the room, which lights zero cells
+# at full resolution, lit nineteen of three hundred.
+#
+# And it was bought for nothing. Under a profiler this call is under a
+# millisecond; the wall-clock measurement that motivated it was of a
+# benchmark loop that spent its time generating synthetic frames rather than
+# processing them. A property this model depends on, traded away for a
+# fraction of a millisecond that was never there.
+WORK_SCALE = 1.0
+
 # Frames of history before a cell's statistics mean anything. Below this the
 # model reports its own immaturity rather than pretending to a baseline, for
 # the same reason the thermal one does: silence from a model that has learned
@@ -242,7 +258,11 @@ class OpticalBaseline:
     # ------------------------------------------------------------- observe
     def _cells(self, bgr):
         """One frame to the two per-cell statistics."""
-        grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if WORK_SCALE != 1.0:
+            grey = cv2.resize(grey, None, fx=WORK_SCALE, fy=WORK_SCALE,
+                              interpolation=cv2.INTER_AREA)
+        grey = grey.astype(np.float32)
 
         # Structure. Sobel magnitude, then a box mean per cell - INTER_AREA is
         # exactly that mean in one optimised pass.

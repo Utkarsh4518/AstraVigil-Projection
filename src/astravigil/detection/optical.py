@@ -108,6 +108,22 @@ WARMUP_FRAMES = 20
 # apart, while two separate objects twenty pixels across are separate at a
 # fraction of that distance. A fixed pixel gap has to choose which of those
 # to get wrong.
+# Fraction of full resolution the detector actually works at.
+#
+# DEFAULT 1.0, deliberately.
+#
+# This was written at 0.5 to halve each side and quarter the per-pixel work,
+# on a measurement that turned out to be of the wrong thing: a benchmark loop
+# that spent most of itself generating synthetic frames, not detecting in
+# them. Under a profiler this whole call is about 1.2 ms, and the reduction
+# bought a fraction of a millisecond in exchange for raising the smallest
+# visible object from twelve pixels of area to fifty.
+#
+# Kept as an escape hatch for a machine slow enough to need it, and left off,
+# because a behaviour change that buys nothing measurable is not a trade -
+# it is just a change.
+WORK_SCALE = env_float("ASTRAVIGIL_OPTICAL_WORK_SCALE", 1.0)
+
 MERGE_GAP_PX = 8.0          # floor, for objects too small for the fraction
 MERGE_GAP_FRAC = env_float("ASTRAVIGIL_OPTICAL_MERGE_FRAC", 0.35)
 
@@ -222,10 +238,17 @@ def _merge_fragments(dets, frame_shape):
 class OpticalDetector:
     def __init__(self, threshold=DEFAULT_THRESHOLD,
                  min_area=DEFAULT_MIN_AREA_PX, max_area=DEFAULT_MAX_AREA_PX,
-                 alpha=BACKGROUND_ALPHA, roi=None, every_n=1):
+                 alpha=BACKGROUND_ALPHA, roi=None, every_n=1,
+                 work_scale=None):
         self.threshold = threshold
-        self.min_area = min_area
-        self.max_area = max_area
+        # Areas are quoted in FULL-resolution pixels by every caller, so they
+        # are converted once here rather than at each comparison.
+        self.work_scale = (WORK_SCALE if work_scale is None
+                           else float(work_scale))
+        self.work_scale = min(max(self.work_scale, 0.1), 1.0)
+        area_scale = self.work_scale ** 2
+        self.min_area = max(3.0, min_area * area_scale)
+        self.max_area = max_area * area_scale
         self.alpha = alpha
         # (x, y, w, h) in optical pixels, normally the thermal footprint.
         self.roi = roi
@@ -287,6 +310,10 @@ class OpticalDetector:
         if self.roi is not None:
             x, y, w, h = self.roi
             grey = grey[y:y + h, x:x + w]
+        if self.work_scale != 1.0:
+            grey = cv2.resize(grey, None, fx=self.work_scale,
+                              fy=self.work_scale,
+                              interpolation=cv2.INTER_AREA)
         grey = grey.astype(np.float32)
 
         if self.background is None or self.background.shape != grey.shape:
@@ -301,7 +328,11 @@ class OpticalDetector:
         # Measured against the background model rather than against the frame,
         # so this is the noise in what CHANGED, which is what the threshold is
         # applied to.
-        self.noise = 1.4826 * float(np.median(diff))
+        # Every sixteenth pixel. A median is a sort, and sorting three
+        # hundred thousand floats every frame to estimate a noise floor that
+        # moves with the room lighting is paying a great deal for a digit
+        # that does not change between frames.
+        self.noise = 1.4826 * float(np.median(diff[::4, ::4]))
         self.effective_threshold = max(self.threshold,
                                        NOISE_SIGMA * self.noise)
         mask = (diff > self.effective_threshold).astype(np.uint8) * 255
@@ -312,9 +343,11 @@ class OpticalDetector:
 
         # Same discipline as the thermal side: do not learn where something
         # was detected, or an object that stops dissolves into the model.
-        quiet = mask == 0
-        self.background[quiet] = ((1 - self.alpha) * self.background[quiet]
-                                  + self.alpha * grey[quiet])
+        # cv2 with a mask, rather than numpy boolean indexing. The numpy
+        # form builds two temporary arrays the size of the frame and does a
+        # masked scatter back; this is the same arithmetic in one C pass.
+        quiet = cv2.bitwise_not(mask)
+        cv2.accumulateWeighted(grey, self.background, self.alpha, mask=quiet)
         self.frames_seen += 1
         if not self.ready:
             self._last = []
@@ -325,6 +358,8 @@ class OpticalDetector:
 
     @staticmethod
     def _plausible(area, w, h, frame_shape):
+        # Everything here is a ratio, so it is scale free and works on the
+        # reduced frame exactly as it did on the full one.
         """Could a blob this shape be an object, rather than a wall edge?
 
         Cheap, and applied before the expensive per-blob work below - which
@@ -344,6 +379,7 @@ class OpticalDetector:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         ox, oy = (self.roi[0], self.roi[1]) if self.roi else (0, 0)
+        inv = 1.0 / self.work_scale
         out = []
         for c in contours:
             area = float(cv2.contourArea(c))
@@ -365,9 +401,10 @@ class OpticalDetector:
             cx = m["m10"] / m["m00"] if m["m00"] else x + w / 2.0
             cy = m["m01"] / m["m00"] if m["m00"] else y + h / 2.0
             out.append(OpticalDetection(
-                box=(x + ox, y + oy, w, h),
-                centroid=(cx + ox, cy + oy),
-                area=area,
+                box=(int(x * inv) + ox, int(y * inv) + oy,
+                     max(1, int(w * inv)), max(1, int(h * inv))),
+                centroid=(cx * inv + ox, cy * inv + oy),
+                area=area * inv * inv,
                 aspect=float(w) / max(h, 1),
                 extent=area / max(float(w * h), 1.0),
                 solidity=area / max(hull, 1.0),
