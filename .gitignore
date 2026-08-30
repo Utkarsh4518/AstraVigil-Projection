@@ -31,3 +31,8 @@ data/alerts/*.jsonl
 !data/**/.gitkeep
 
 .DS_Store
+
+# Object-detection weights. Fetched with scripts/fetch_object_model.py,
+# a few MB each, and identical for everyone - there is nothing about a
+# particular rig in them and no reason to carry them in the history.
+data/models/

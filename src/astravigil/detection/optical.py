@@ -36,9 +36,35 @@ Two deliberate differences from the thermal detector:
 import cv2
 import numpy as np
 
+from ..utils.env import env_float
+
 DEFAULT_THRESHOLD = 18.0        # grey levels away from the background model
 DEFAULT_MIN_AREA_PX = 12
 DEFAULT_MAX_AREA_PX = 30000
+
+# Shape sanity, all on the BOUNDING BOX rather than the contour area.
+#
+# The area limits above cannot catch what an indoor rig actually produces. A
+# lighting change along a wall, or a camera that shifts a pixel, leaves a long
+# thin L-shaped contour tracing an edge: a few hundred pixels of area, well
+# inside every area limit, inside a bounding box that spans most of the frame.
+# The console then draws a box round half the room and calls it a contact,
+# which is what an operator photographed and reasonably called nonsense.
+#
+# Three tests, each aimed at one way that goes wrong:
+
+# How much of the searched frame one contact may claim. Something occupying a
+# third of the view is the view changing, not an object arriving.
+MAX_BOX_FRAC = env_float("ASTRAVIGIL_OPTICAL_MAX_BOX_FRAC", 0.22)
+
+# Longest side over shortest. Real objects are not 8:1 slivers; wall edges,
+# door frames, curtain lines and skirting boards are exactly that.
+MAX_BOX_ASPECT = env_float("ASTRAVIGIL_OPTICAL_MAX_ASPECT", 6.0)
+
+# How much of its own bounding box the blob has to fill. This is the test that
+# does most of the work: an L along two walls has a huge box and fills almost
+# none of it, while a person, a bag or an airframe fills a good half.
+MIN_BOX_EXTENT = env_float("ASTRAVIGIL_OPTICAL_MIN_EXTENT", 0.14)
 BACKGROUND_ALPHA = 0.02
 WARMUP_FRAMES = 20
 MERGE_GAP_PX = 8.0
@@ -97,6 +123,10 @@ class OpticalDetector:
         self.calls = 0
         self.last_mask = None
         self._last = []
+        # Contacts thrown out for being the wrong shape to be an object.
+        # Counted rather than silently dropped: a filter nobody can see the
+        # effect of is one nobody can tell is set wrong.
+        self.rejected_shape = 0
 
     @property
     def ready(self):
@@ -165,6 +195,23 @@ class OpticalDetector:
         self._last = self._contours(mask, signed, diff)
         return self._last
 
+    @staticmethod
+    def _plausible(area, w, h, frame_shape):
+        """Could a blob this shape be an object, rather than a wall edge?
+
+        Cheap, and applied before the expensive per-blob work below - which
+        is most of the cost of this stage on a cluttered indoor frame.
+        """
+        fh, fw = frame_shape[:2]
+        box = float(w * h)
+        if box <= 0:
+            return False
+        if box > MAX_BOX_FRAC * fw * fh:
+            return False
+        if max(w, h) / max(min(w, h), 1) > MAX_BOX_ASPECT:
+            return False
+        return area / box >= MIN_BOX_EXTENT
+
     def _contours(self, mask, signed, diff):
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
@@ -177,6 +224,9 @@ class OpticalDetector:
             if not (self.min_area <= area <= self.max_area):
                 continue
             x, y, w, h = cv2.boundingRect(c)
+            if not self._plausible(area, w, h, mask.shape):
+                self.rejected_shape += 1
+                continue
             blob = np.zeros(mask.shape, np.uint8)
             cv2.drawContours(blob, [c], -1, 255, -1)
             pix = blob > 0

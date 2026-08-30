@@ -602,6 +602,7 @@ class Pipeline:
         res.optical_roi = self.optical.roi
         res.cross = {
             "optical_candidates": len(optical_dets),
+            "optical_shape_rejects": self.optical.rejected_shape,
             "paired_with_thermal": len(pairs),
             "optical_only": len(unmatched_optical),
             "optical_only_confirmed_warm": confirmed,

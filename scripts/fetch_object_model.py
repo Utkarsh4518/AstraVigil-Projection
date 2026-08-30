@@ -31,16 +31,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 DEST_DIR = "data/models"
 
+# The yolov5 v7.0 release ships ready-made ONNX at three sizes, all verified
+# reachable and all decoded by the recogniser without configuration. Larger
+# is more accurate and proportionally slower, and since this runs on a
+# throttle rather than per frame, a Pi with headroom can afford `s`.
+RELEASE = "https://github.com/ultralytics/yolov5/releases/download/v7.0/"
+SIZES = {
+    "n": ("yolov5n.onnx", "4 MB, fastest, fewest names"),
+    "s": ("yolov5s.onnx", "15 MB, noticeably better - try this first on a PC"),
+    "m": ("yolov5m.onnx", "43 MB, best, slow on a Pi"),
+}
+
 # Tried in order. Mirrors move and repositories are renamed, so this is a list
 # of candidates rather than one address, and a failure here is inconvenient
 # rather than fatal - see the module docstring.
 CANDIDATES = [
-    ("yolov8n.onnx",
-     "https://github.com/ultralytics/assets/releases/download/v8.3.0/"
-     "yolov8n.onnx"),
-    ("yolov5n.onnx",
-     "https://github.com/ultralytics/yolov5/releases/download/v7.0/"
-     "yolov5n.onnx"),
+    ("yolov5n.onnx", RELEASE + "yolov5n.onnx"),
     ("yolov8n.onnx",
      "https://huggingface.co/Xenova/yolov8n/resolve/main/onnx/model.onnx"),
 ]
@@ -99,8 +105,10 @@ def check():
         print(f"RUNS           {ms:.0f} ms on a {640}x{480} frame, "
               f"{len(found)} objects on a blank one")
         print(f"CLASSES        {len(O.COCO)} COCO labels")
-        print("\nIt will run every "
-              f"{r.every_n} optical frames on the live rig.")
+        print(f"INPUT          {r.size}px, probed from the model itself")
+        print(f"\nIt will run every {r.every_n} optical frames "
+              f"on the live rig.")
+        print("For more names, fetch a bigger one: --size s --force")
     except Exception as exc:
         print(f"BROKEN         {type(exc).__name__}: {exc}")
         return 1
@@ -109,6 +117,10 @@ def check():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--size", choices=sorted(SIZES),
+                    help="which model to fetch: "
+                         + "; ".join(f"{k} = {v[1]}"
+                                     for k, v in sorted(SIZES.items())))
     ap.add_argument("--url", help="download this instead of the defaults")
     ap.add_argument("--name", default="yolov8n.onnx",
                     help="filename to save --url as")
@@ -130,7 +142,13 @@ def main():
         print("use --force to download anyway, or --check to test it")
         return 0
 
-    todo = ([(args.name, args.url)] if args.url else CANDIDATES)
+    if args.size:
+        name = SIZES[args.size][0]
+        todo = [(name, RELEASE + name)]
+    elif args.url:
+        todo = [(args.name, args.url)]
+    else:
+        todo = CANDIDATES
     for name, url in todo:
         dest = os.path.join(args.dest, name)
         print(f"trying {url}")

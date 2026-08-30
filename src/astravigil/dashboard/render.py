@@ -183,6 +183,17 @@ def _draw_recognitions(img, result, fw, fh):
     return len(found)
 
 
+def _clutter_note(result):
+    """How many contacts were the wrong shape to be objects.
+
+    Shown because a silent filter is one nobody can tell is set wrong. If
+    this number is large and the pane looks empty, the thresholds are too
+    tight; if it is zero and the pane is a mess, they are too loose.
+    """
+    n = (getattr(result, "cross", None) or {}).get("optical_shape_rejects", 0)
+    return f"  {n} edge-shaped rejected" if n else ""
+
+
 def _objects_note(result):
     """What to add to the optical banner about naming."""
     st = getattr(result, "recogniser_stats", None) or {}
@@ -366,7 +377,7 @@ def optical_view(result, H):
         _draw_recognitions(img, result, fw, fh)
         _draw_optical_own(img, result, fw, fh)
         _banner(img, _uncalibrated_banner(result, "OPTICAL")
-                + _objects_note(result))
+                + _objects_note(result) + _clutter_note(result))
         return img
 
     seen = assessment_map(result)
@@ -426,7 +437,7 @@ def optical_view(result, H):
     c = result.cross or {}
     _banner(img, f"OPTICAL - {c.get('paired_with_thermal', 0)} paired with "
                  f"thermal, {c.get('optical_only', 0)} optical-only"
-                 + _objects_note(result))
+                 + _objects_note(result) + _clutter_note(result))
     return img
 
 

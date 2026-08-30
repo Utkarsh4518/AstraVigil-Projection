@@ -49,14 +49,31 @@ from ..utils.env import env_float, env_int
 MODEL_DIR = os.environ.get("ASTRAVIGIL_MODEL_DIR", "data/models")
 MODEL_PATH = os.environ.get("ASTRAVIGIL_OBJECT_MODEL", "")
 
-# Square input the image is letterboxed into. 320 rather than 640: on a Pi 4
-# the cost scales with the square of this, and at watch range the objects
-# that matter are large in frame. Raise it for small distant targets if the
-# machine has the headroom.
+# Square input the image is letterboxed into, PREFERRED rather than fixed.
+#
+# Most YOLO ONNX exports bake their input resolution into the graph, and
+# feeding a different one fails deep inside a reshape with an assertion that
+# names neither the model nor the size. Measured on the yolov5n export this
+# ships by default: a 320 blob into a 640 graph dies in Reshape2Layer. So
+# this is where the probe starts, and the loader falls back to whatever the
+# file actually wants.
+#
+# Small is preferred because cost scales with the square of it and this runs
+# on a Pi; 0 means "ask the model and use whatever it says".
 INPUT_SIZE = env_int("ASTRAVIGIL_OBJECT_INPUT", 320)
 
+# Tried in order when the preferred size is rejected. These are the sizes
+# YOLO exports are actually produced at.
+SIZE_CANDIDATES = (320, 640, 416, 512, 256, 288, 480, 960, 1280)
+
 # Keep a detection above this, and merge boxes overlapping more than this.
-CONF_MIN = env_float("ASTRAVIGIL_OBJECT_CONF", 0.40)
+# 0.30 rather than a safer 0.45. Measured on a real room photo with the
+# 4 MB yolov5n this ships by default: 0.40 named four objects, 0.30 named
+# five, 0.20 named seven and started inventing a television out of a laptop
+# screen. Naming is context rather than an alarm - nothing escalates because
+# of it - so the cost of one wrong label is far below the cost of a silent
+# pane, which is what an operator has already reported once.
+CONF_MIN = env_float("ASTRAVIGIL_OBJECT_CONF", 0.30)
 NMS_IOU = env_float("ASTRAVIGIL_OBJECT_NMS", 0.45)
 
 # Frames between runs. This is the expensive thing in the loop by an order of
@@ -193,10 +210,51 @@ class ObjectRecogniser:
                 cv2.setNumThreads(max(1, (os.cpu_count() or 2) - 2))
             except Exception:
                 pass
+            if self.kind == "onnx":
+                self.size = self._probe_size()
         except Exception as exc:
             # A broken or half-downloaded model must not stop the sensor.
             self.net = None
             self.error = f"{type(exc).__name__}: {exc}"
+
+    def _probe_size(self):
+        """Find an input size this graph will actually accept.
+
+        Asking the file directly means parsing ONNX, and a graph can declare a
+        dynamic axis and still reject one - so this runs the thing instead.
+        One forward pass per candidate at startup, worst case a few hundred
+        milliseconds once, in exchange for never having to tell an operator
+        which number to put in an environment variable.
+        """
+        tried = []
+        for size in (self.size,) + SIZE_CANDIDATES:
+            if size in tried or size <= 0:
+                continue
+            tried.append(size)
+            blob = cv2.dnn.blobFromImage(
+                np.zeros((size, size, 3), np.uint8), 1 / 255.0, (size, size),
+                swapRB=True, crop=False)
+            try:
+                self.net.setInput(blob)
+                out = np.squeeze(self.net.forward())
+            except cv2.error:
+                continue
+            if out.ndim != 2:
+                continue
+            wide = min(out.shape)
+            if wide not in (len(COCO) + 4, len(COCO) + 5):
+                # Runs, but is not a COCO YOLO. Say so once here rather than
+                # letting every frame fail the same way in the decoder.
+                self.error = (f"model output is {out.shape}, which is not a "
+                              f"COCO YOLO ({len(COCO) + 4} or "
+                              f"{len(COCO) + 5} attributes)")
+                self.net = None
+                return size
+            return size
+        self.error = (f"no input size worked - tried {tried}. "
+                      f"Set ASTRAVIGIL_OBJECT_INPUT if you know it.")
+        self.net = None
+        return self.size
 
     @property
     def available(self):
