@@ -69,6 +69,14 @@ METADATA_ROW = 192
 BYTES_PER_PIXEL = 2
 EXPECTED_FRAME_BYTES = FRAME_W * FRAME_H * BYTES_PER_PIXEL  # 176128
 
+# How much trailing data a frame may carry and still be believed.
+#
+# Some cameras pad the last packet of a frame. A handful of bytes is padding;
+# anything more is a frame of a different shape, and reshaping that to
+# 256x344 slices every row at the wrong offset - which is what draws as
+# vertical stripes across the whole picture.
+SIZE_SLACK_BYTES = 4096
+
 # Ambient temperature sits in the first cell of the metadata row, in
 # hundredths of a degree.
 AMBIENT_SCALE = 100.0

@@ -286,6 +286,22 @@ class Pipeline:
         return {"stopped": True, "saved": saved,
                 "frames": self.site.frames}
 
+    @property
+    def settled_ready(self):
+        """Has this site been learned well enough to call anything new?
+
+        Both models, and not during a learning run. The thermal one carries
+        the dwell and the temperature history; the optical one is the only
+        thing that can see an object with no heat signature. An arrival
+        judged against one of the two is half an answer, and the half that is
+        missing is the half this system exists for.
+        """
+        if self._session is not None:
+            return False
+        if self.site.learning:
+            return False
+        return self.optical_site is None or not self.optical_site.learning
+
     def learning_status(self):
         s = self.site.stats()
         cov = float(np.clip(self.site.ref_n / MIN_LEARNED_FRAMES, 0, 1).mean())
@@ -296,6 +312,7 @@ class Pipeline:
         ocov = (float(self.optical_site.coverage().mean())
                 if self.optical_site is not None else 0.0)
         out = {"active": self._session is not None,
+               "settled_ready": bool(self.settled_ready),
                "coverage": round(cov, 3),
                "optical_coverage": round(ocov, 3),
                "scene_maturity": s["scene_maturity"],
@@ -607,8 +624,19 @@ class Pipeline:
             self._maybe_escalate(a, det, tr, res, optical_ev)
             assessments.append(a)
 
-        statics = self._unclaimed_statics(self.site.static_anomalies(),
-                                          detections)
+        # Nothing is "settled" until the site has been learned.
+        #
+        # A settled object is defined by contrast with a baseline: it was not
+        # here, the model knows what here looks like, and now it is here. A
+        # model that has learned nothing has no such contrast to offer, and
+        # every object in the room is equally new to it - which is why an
+        # unlearned rig reports the furniture as arrivals. During a learning
+        # run it is worse than useless: the operator is deliberately
+        # rebuilding the definition of normal, and anything reported against
+        # a half-built one is noise by construction.
+        statics = ([] if not self.settled_ready
+                   else self._unclaimed_statics(self.site.static_anomalies(),
+                                                detections))
         assessments.extend(assess_static(a) for a in statics)
 
         # OPTICAL -> THERMAL. Everything the optical camera found that no
@@ -660,7 +688,7 @@ class Pipeline:
         # keeps reporting one. Needs no homography, so it works on an
         # uncalibrated rig - which is the whole point of drawing it.
         optical_regions = []
-        if self.optical_site is not None:
+        if self.optical_site is not None and self.settled_ready:
             optical_regions = self.optical_site.settled_regions()
             if self.H is not None and detections:
                 # Calibrated: a thermal track already carries this object and
@@ -990,6 +1018,17 @@ class Pipeline:
             self.alerts.clear(key)
             return cells
         return 0
+
+    def refresh_objects(self):
+        """Throw away the held object names and take a fresh look.
+
+        The names are held for a few passes so a confidence sitting on the
+        threshold does not flicker. The cost of that is a stale name after
+        somebody has actually moved the furniture, and no amount of waiting
+        fixes it faster than asking again. This is the ask-again.
+        """
+        self.recogniser.forget()
+        return {"cleared": True, "model": self.recogniser.stats()["model"]}
 
     def save_site(self, path):
         return self.site.save(path)

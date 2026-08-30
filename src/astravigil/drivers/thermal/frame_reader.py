@@ -24,6 +24,7 @@ import numpy as np
 
 from .constants import (
     EXPECTED_FRAME_BYTES,
+    SIZE_SLACK_BYTES,
     FRAME_H,
     FRAME_W,
     HEADER_EOF,
@@ -42,6 +43,16 @@ class FrameStats:
         self.short_frames = 0     # packet loss inside a frame
         self.torn_frames = 0      # a missed end-of-frame packet
         self.error_payloads = 0   # camera flagged the payload itself
+        # A complete frame that is not the size the driver negotiated.
+        #
+        # These used to be truncated and reshaped anyway, which is the worst
+        # of the available options. If the camera is sending rows of a
+        # different width, cutting the buffer at the expected length starts
+        # every row partway through the one before it, and the frame draws as
+        # dense vertical stripes with a seam where the drift wraps. It looks
+        # like a broken sensor and it is a broken assumption.
+        self.mismatched_frames = 0
+        self.last_frame_bytes = 0
         self.read_errors = 0      # timeouts and USB errors, lifetime total
         # Reset by every successful read. This is the one to judge health on:
         # the lifetime total climbs slowly even on a perfectly healthy feed,
@@ -51,6 +62,7 @@ class FrameStats:
     def __repr__(self):
         return (f"FrameStats(frames={self.frames}, short={self.short_frames}, "
                 f"torn={self.torn_frames}, errors={self.error_payloads}, "
+                f"mismatched={self.mismatched_frames}, "
                 f"reads={self.read_errors})")
 
 
@@ -120,9 +132,26 @@ def frames(dev, endpoint=STREAM_ENDPOINT, stop_event=None, stats=None,
             frame_damaged = False
             continue
 
+        stats.last_frame_bytes = len(payload)
         if len(payload) < EXPECTED_FRAME_BYTES:
             # Lost packets mid-frame. Common enough on a loaded bus; just skip.
             stats.short_frames += 1
+            payload = bytearray()
+            continue
+
+        # A complete frame that is too BIG is not a frame with extra on the
+        # end - it is a frame of a different shape, which means the format
+        # negotiation did not take. Truncating it produces a picture, and the
+        # picture is a lie: rows sliced at the wrong stride, drawn as vertical
+        # stripes. Refuse it and say what arrived instead.
+        extra = len(payload) - EXPECTED_FRAME_BYTES
+        if extra > SIZE_SLACK_BYTES:
+            stats.mismatched_frames += 1
+            if stats.mismatched_frames == 1:
+                print(f"thermal: camera sent {len(payload)} bytes, expected "
+                      f"{EXPECTED_FRAME_BYTES} for {FRAME_W}x{FRAME_H} - "
+                      f"the stream format is not what was negotiated, so "
+                      f"frames are being dropped rather than drawn wrong")
             payload = bytearray()
             continue
 

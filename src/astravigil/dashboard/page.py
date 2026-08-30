@@ -320,6 +320,8 @@ _PAGE = r"""<!doctype html>
     </span>
     <button id="learnbtn" class="learnbtn" onclick="toggleLearn()"
             title="Watch the site and build a model of what is normal here">learn this site</button>
+    <button onclick="refreshObjects()"
+            title="Forget the held object names and take a fresh look">rescan objects</button>
     <button class="devonly" onclick="saveSite()" title="Write the learned site model to disk">save site model</button>
     <span id="kioskbar">
       <button onclick="kioskRestart()" title="Restart the console">restart</button>
@@ -512,6 +514,7 @@ async function post(url, body) {
 const accept = key => post("/api/accept", {key});
 const ack = id => post("/api/ack", {id});
 const saveSite = () => post("/api/save_site");
+const refreshObjects = () => post("/api/objects/refresh");
 
 function esc(t) {
   return String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
@@ -762,8 +765,13 @@ async function poll() {
     const orx = (stats.optical_site || {}).regions_found || 0;
     document.getElementById("watchnote").textContent = wl.length
       ? `settled objects · "normal" teaches the site and stops the question`
-      : (orx > 6 ? `${orx} patches off baseline — the site model is stale, `
-                 + `re-learn it` : "objects that arrived and stayed");
+      : ((stats.learning || {}).settled_ready === false
+           ? "waiting for the site to be learned — nothing counts as new "
+             + "until there is a baseline to be new against"
+           : orx > 6
+             ? `${orx} patches off baseline — the site model is stale, `
+               + `re-learn it`
+             : "objects that arrived and stayed");
 
     // Where an alert goes when it disappears. It closes five seconds after
     // the object stops being seen, and every open and close is appended to

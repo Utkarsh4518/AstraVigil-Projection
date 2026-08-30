@@ -311,6 +311,13 @@ def create_app(pipeline, state, site_path=None):
             cells = pipeline.accept_assessment(key)
         return jsonify({"key": key, "cells": cells})
 
+    @app.route("/api/objects/refresh", methods=["POST"])
+    def api_objects_refresh():
+        """Operator: forget the held object names and look again."""
+        with state.lock:
+            out = pipeline.refresh_objects()
+        return jsonify(out)
+
     @app.route("/api/ack", methods=["POST"])
     def api_ack():
         alert_id = (request.get_json(silent=True) or {}).get("id")

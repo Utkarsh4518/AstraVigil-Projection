@@ -521,6 +521,12 @@ class ObjectRecogniser:
         threading.Thread(target=run, daemon=True,
                          name="astravigil-recognise").start()
 
+    def forget(self):
+        """Drop every held name and re-run on the next frame."""
+        self._held = []
+        self._last = []
+        self._tick = 0
+
     def _remember(self, found, now=None):
         """Merge this pass into the held set and drop what has gone quiet.
 
