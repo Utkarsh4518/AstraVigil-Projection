@@ -70,7 +70,30 @@ SIZES = {
     "s": ("yolov5s.onnx", "15 MB, noticeably better - try this first on a PC"),
     "m": ("yolov5m.onnx", "43 MB, best, slow on a Pi"),
 }
-DEFAULT_MODEL = SIZES[os.environ.get("ASTRAVIGIL_OBJECT_SIZE", "n")][0]
+# `s` and not `n`, which was the wrong call and cost three rounds of "why is
+# the chair not detected".
+#
+# `n` is the smallest model in the family and it was chosen for a Pi, back
+# when inference ran on the capture thread and every millisecond was coming
+# out of the frame rate. It no longer does, so the only cost of a bigger
+# model is how often the answer refreshes - and the difference in what comes
+# back is not marginal. Measured on one room photograph, cropped progressively
+# tighter until a chair filled the view the way it fills the rig's:
+#
+#   whole room          n: 4 objects        s: 9 objects, including the chair
+#   chair, some room    n: nothing          s: chair 0.35
+#   chair fills frame   n: nothing          s: chair 0.36
+#
+# `n` finds nothing at all once one object dominates the frame, which is the
+# ordinary case for a camera watching a room rather than a sky.
+DEFAULT_MODEL = SIZES[os.environ.get("ASTRAVIGIL_OBJECT_SIZE", "s")][0]
+
+# Best first. find_model() used to take whatever sorted() handed back, which
+# is alphabetical, which means an install that already had yolov5n.onnx would
+# keep using it after fetching a better one - a silent downgrade at the worst
+# possible moment, right after somebody went and got the bigger model
+# specifically because the smaller one was not working.
+MODEL_PREFERENCE = ("yolov5m.onnx", "yolov5s.onnx", "yolov5n.onnx")
 AUTOFETCH = env_int("ASTRAVIGIL_OBJECT_AUTOFETCH", 1) != 0
 USER_AGENT = "AstraVigil/1.0"
 
@@ -221,6 +244,10 @@ def find_model():
     """
     if MODEL_PATH:
         return MODEL_PATH if os.path.exists(MODEL_PATH) else None
+    for name in MODEL_PREFERENCE:
+        path = os.path.join(MODEL_DIR, name)
+        if os.path.exists(path):
+            return path
     for pattern in ("*.onnx", "*.pb"):
         found = sorted(glob.glob(os.path.join(MODEL_DIR, pattern)))
         if found:

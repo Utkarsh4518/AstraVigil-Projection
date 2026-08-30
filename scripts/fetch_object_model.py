@@ -41,6 +41,7 @@ from astravigil.detection.objects import (       # noqa: E402
 # of candidates rather than one address, and a failure here is inconvenient
 # rather than fatal - see the module docstring.
 CANDIDATES = [
+    ("yolov5s.onnx", RELEASE + "yolov5s.onnx"),
     ("yolov5n.onnx", RELEASE + "yolov5n.onnx"),
     ("yolov8n.onnx",
      "https://huggingface.co/Xenova/yolov8n/resolve/main/onnx/model.onnx"),
@@ -86,7 +87,11 @@ def check():
         print(f"INPUT          {r.size}px, probed from the model itself")
         print(f"\nIt will run every {r.every_n} optical frames "
               f"on the live rig.")
-        print("For more names, fetch a bigger one: --size s --force")
+        if "yolov5n" in (st["model"] or ""):
+            print("This is the SMALL model. It finds nothing at all once one "
+                  "object fills the frame -")
+            print("fetch the better one:  "
+                  "python scripts/fetch_object_model.py --size s --force")
     except Exception as exc:
         print(f"BROKEN         {type(exc).__name__}: {exc}")
         return 1
