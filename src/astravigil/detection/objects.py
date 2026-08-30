@@ -97,22 +97,25 @@ MODEL_PREFERENCE = ("yolov5m.onnx", "yolov5s.onnx", "yolov5n.onnx")
 AUTOFETCH = env_int("ASTRAVIGIL_OBJECT_AUTOFETCH", 1) != 0
 USER_AGENT = "AstraVigil/1.0"
 
-# Square input the image is letterboxed into, PREFERRED rather than fixed.
+# Square input the image is letterboxed into.
 #
-# Most YOLO ONNX exports bake their input resolution into the graph, and
-# feeding a different one fails deep inside a reshape with an assertion that
-# names neither the model nor the size. Measured on the yolov5n export this
-# ships by default: a 320 blob into a 640 graph dies in Reshape2Layer. So
-# this is where the probe starts, and the loader falls back to whatever the
-# file actually wants.
-#
-# Small is preferred because cost scales with the square of it and this runs
-# on a Pi; 0 means "ask the model and use whatever it says".
-INPUT_SIZE = env_int("ASTRAVIGIL_OBJECT_INPUT", 320)
+# 0 means "ask the model", which is the right default and now the only one
+# most people should use: every YOLO ONNX export bakes its input resolution
+# into the graph, and feeding a different one fails deep inside a reshape.
+# Set it only to force a specific size on a model that accepts several.
+INPUT_SIZE = env_int("ASTRAVIGIL_OBJECT_INPUT", 0)
 
-# Tried in order when the preferred size is rejected. These are the sizes
-# YOLO exports are actually produced at.
-SIZE_CANDIDATES = (320, 640, 416, 512, 256, 288, 480, 960, 1280)
+# Tried in order. 640 first because that is what essentially every YOLO
+# export off the shelf is built at - including all three this ships.
+#
+# The order matters for more than speed. A rejected size does not raise
+# quietly: OpenCV prints a four-line assertion failure from C++ straight to
+# stderr, naming a reshape layer and a tensor shape, and an operator who has
+# just run the install command reasonably reads that as a broken install and
+# stops. Getting it right on the first attempt means there is nothing to
+# print. The probe also silences OpenCV's own logging while it works, for
+# the models where the first guess is still wrong.
+SIZE_CANDIDATES = (640, 320, 416, 512, 480, 288, 256, 960, 1280)
 
 # Keep a detection above this, and merge boxes overlapping more than this.
 # 0.30 rather than a safer 0.45. Measured on a real room photo with the
@@ -204,6 +207,25 @@ class Recognition:
 
     def __repr__(self):
         return f"<{self.label} {self.confidence:.2f} {self.box}>"
+
+
+def _hush_opencv():
+    """Silence OpenCV's C++ logging; returns a callable to restore it.
+
+    Only ever wrapped around the size probe. A rejected input size is an
+    expected, handled outcome there - the loop exists precisely to try sizes
+    until one fits - but OpenCV reports it as a multi-line ERROR on stderr
+    before the exception is even raised, which reads as a failed install to
+    anybody who has just typed the install command.
+    """
+    try:
+        log = cv2.utils.logging
+        before = log.getLogLevel()
+        log.setLogLevel(log.LOG_LEVEL_SILENT)
+        return lambda: log.setLogLevel(before)
+    except Exception:
+        # Not every build exposes this. Noisy is better than broken.
+        return lambda: None
 
 
 def download_model(url, dest, timeout=60, progress=None):
@@ -358,14 +380,27 @@ class ObjectRecogniser:
                 self.kind = "tensorflow"
             # One thread would be wrong on a quad-core Pi and all of them
             # would starve the capture loop. Two leaves headroom for it.
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            # Both are already the defaults, and newer OpenCV logs a
+            # warning for setting them at all. Asked for explicitly because
+            # older builds do not default the same way, and hushed because a
+            # warning about a no-op is one more line an operator has to read
+            # past to find out whether the install worked.
+            quiet = _hush_opencv()
+            try:
+                self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+                self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            finally:
+                quiet()
             try:
                 cv2.setNumThreads(max(1, (os.cpu_count() or 2) - 2))
             except Exception:
                 pass
             if self.kind == "onnx":
                 self.size = self._probe_size()
+            elif self.size <= 0:
+                # A TensorFlow SSD takes whatever size it is given, so
+                # nothing is probed and "ask the model" has no answer.
+                self.size = 320
         except Exception as exc:
             # A broken or half-downloaded model must not stop the sensor.
             self.net = None
@@ -381,6 +416,13 @@ class ObjectRecogniser:
         which number to put in an environment variable.
         """
         tried = []
+        quiet = _hush_opencv()
+        try:
+            return self._probe_sizes(tried)
+        finally:
+            quiet()
+
+    def _probe_sizes(self, tried):
         for size in (self.size,) + SIZE_CANDIDATES:
             if size in tried or size <= 0:
                 continue
