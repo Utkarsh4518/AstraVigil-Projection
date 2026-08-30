@@ -65,6 +65,20 @@ CROSS_LOG_MAX = 14
 # is itself the signature, so it gets its own trigger.
 ESCALATE_COLD_DWELL_S = 20.0
 
+# Most optical contacts one frame may show at once.
+#
+# A backstop, not a threshold. The detector's own noise floor now rises with
+# the light, which is the real fix for a dark room producing contacts out of
+# sensor grain - but any threshold has a bad night, and the failure mode when
+# it does is not one wrong box, it is forty, each numbered, over a picture of
+# an empty room. Past a certain count the answer is not "here are your
+# contacts" but "this camera cannot currently tell", and a console should say
+# the second rather than draw the first.
+#
+# Kept as the largest few by area, which is the order the detector returns:
+# if something real is in a noisy frame it is not the smallest thing in it.
+MAX_OPTICAL_SHOWN = 8
+
 # Confidence below which the local classifier counts as unsure, and the
 # threat above which being unsure is worth an API call.
 #
@@ -554,7 +568,8 @@ class Pipeline:
             assessments.append(oa)
             # Keyed by box because an optical detection has no id of its own
             # and the renderer has only the detection in hand.
-            optical_cues[tuple(odet.box)] = self.cues.number(key, now)
+            if len(optical_cues) < MAX_OPTICAL_SHOWN:
+                optical_cues[tuple(odet.box)] = self.cues.number(key, now)
             dwell = dwells.get(key, 0.0)
             self._note_cross(
                 "optical asks thermal", key, oa.label,
@@ -571,7 +586,7 @@ class Pipeline:
         # thing is warm, and a threat score built on an unaskable question is
         # worse than no score.
         if self.H is None:
-            for odet in optical_dets:
+            for odet in optical_dets[:MAX_OPTICAL_SHOWN]:
                 key = self.optical_contacts.key_for(odet.centroid)
                 optical_cues[tuple(odet.box)] = self.cues.number(key, now)
 
@@ -646,6 +661,9 @@ class Pipeline:
         res.cross = {
             "optical_candidates": len(optical_dets),
             "optical_shape_rejects": self.optical.rejected_shape,
+            "optical_hidden": max(0, len(optical_dets) - len(optical_cues)),
+            "optical_noise": round(self.optical.noise, 1),
+            "optical_threshold": round(self.optical.effective_threshold, 1),
             "paired_with_thermal": len(pairs),
             "optical_only": len(unmatched_optical),
             "optical_only_confirmed_warm": confirmed,

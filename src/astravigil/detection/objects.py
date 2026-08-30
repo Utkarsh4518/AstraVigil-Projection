@@ -107,6 +107,24 @@ NMS_IOU = env_float("ASTRAVIGIL_OBJECT_NMS", 0.45)
 # frame would spend the whole budget re-deciding that the chair is a chair.
 EVERY_N = env_int("ASTRAVIGIL_OBJECT_EVERY_N", 25)
 
+# Contrast stretching before inference was tried here and MEASURED WORSE, so
+# there is none. It seemed obvious: a detector trained on daylight cannot see
+# a frame whose histogram sits in the bottom fifth of the range, and CLAHE
+# spreads it back out. On the same room photographed and then dimmed, with
+# the boost against without:
+#
+#   mean 37   laptop                vs   laptop, cup, mouse
+#   mean 12   nothing               vs   laptop
+#
+# It loses objects at every light level and loses them completely at the
+# bottom. The network normalises its own input and copes with a dark frame
+# better than it copes with one whose local statistics have been rewritten;
+# CLAHE amplifies sensor noise, which in a dark room is most of what is
+# there. Recorded because it is a plausible idea that a later reader will
+# have again.
+#
+# What does help in the dark is a bigger model: --size s.
+
 # The 80 COCO classes, in the order every COCO-trained model emits them.
 # Embedded rather than read from a file: it is fixed, it is small, and a
 # missing labels file is one more way for this to half-work and mislabel
@@ -237,6 +255,14 @@ class ObjectRecogniser:
         self.fetch_pct = None
         self._tick = 0
         self._last = []
+        # Inference runs on its own thread. Measured on the rig: 750 ms per
+        # pass on a Pi 4 - which, called inline, is 750 ms the capture loop
+        # spends not capturing, every twenty-fifth frame, as a visible stall.
+        # Nothing downstream needs this frame's answer on this frame: what it
+        # reports is the identity of the furniture.
+        self._busy = False
+        self._lock = threading.Lock()
+        self.stale_ms = 0.0
         if self.path:
             self._load()
             return
@@ -361,23 +387,45 @@ class ObjectRecogniser:
                               if self.fetch_pct is not None else None),
                 "runs": self.runs,
                 "last_ms": round(self.last_ms, 1),
+                "busy": bool(self._busy),
                 "objects": len(self._last),
                 "every_n": self.every_n}
 
     # -------------------------------------------------------------- detect
     def update(self, bgr):
-        """Run on every Nth frame, and hand back the last answer between.
+        """Hand back the latest answer, and start a new one if it is time.
 
-        The same contract the optical detector already uses. A caller must be
-        able to read a name on every frame without paying for one on every
-        frame, and furniture does not move between ticks.
+        NEVER blocks. The caller is a capture loop with a frame budget of a
+        few tens of milliseconds and this takes the better part of a second
+        on the target hardware; the only correct amount of that to spend on
+        the hot path is none. One pass is in flight at a time, so a slow
+        machine degrades by answering less often rather than by queueing.
         """
         if not self.available or bgr is None:
-            return []
+            return self._last
         if self._tick % self.every_n == 0:
-            self._last = self.detect(bgr)
+            self._submit(bgr)
         self._tick += 1
         return self._last
+
+    def _submit(self, bgr):
+        with self._lock:
+            if self._busy:
+                # Still working on the previous one. Skipping is right:
+                # a queue of stale frames would answer questions about a room
+                # as it was several seconds ago.
+                return
+            self._busy = True
+        frame = bgr.copy()          # the caller reuses its buffer
+
+        def run():
+            try:
+                self._last = self.detect(frame)
+            finally:
+                self._busy = False
+
+        threading.Thread(target=run, daemon=True,
+                         name="astravigil-recognise").start()
 
     def detect(self, bgr):
         """One pass. Returns a list of Recognition, highest confidence first."""

@@ -191,8 +191,16 @@ def _clutter_note(result):
     this number is large and the pane looks empty, the thresholds are too
     tight; if it is zero and the pane is a mess, they are too loose.
     """
-    n = (getattr(result, "cross", None) or {}).get("optical_shape_rejects", 0)
-    return f"  {n} edge-shaped rejected" if n else ""
+    c = getattr(result, "cross", None) or {}
+    bits = []
+    if c.get("optical_hidden"):
+        bits.append(f"{c['optical_hidden']} more not shown")
+    thr = c.get("optical_threshold")
+    if thr and thr > 19:
+        # Only worth saying once it has actually moved off its floor.
+        bits.append(f"noise {c.get('optical_noise', 0):.1f}, threshold "
+                    f"raised to {thr:.0f}")
+    return ("  " + ", ".join(bits)) if bits else ""
 
 
 def _objects_note(result):
@@ -369,7 +377,11 @@ def _draw_optical_own(img, result, fw, fh, scale=1, labels=True):
     # contours - there the rectangle is only there to hang the number on.
     weight = 2 if labels else 1
     for od in result.optical_detections:
-        if od.thermal_match is not None:
+        # A number IS the decision to show it. The pipeline numbers what it is
+        # prepared to stand behind and stops at a cap, so this needs no policy
+        # of its own - and the two can never disagree about which boxes an
+        # operator is looking at.
+        if od.thermal_match is not None or tuple(od.box) not in ocues:
             continue
         rx, ry, rw, rh = [v * scale for v in
                           _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)]

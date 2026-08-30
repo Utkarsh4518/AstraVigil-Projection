@@ -65,6 +65,25 @@ MAX_BOX_ASPECT = env_float("ASTRAVIGIL_OPTICAL_MAX_ASPECT", 6.0)
 # does most of the work: an L along two walls has a huge box and fills almost
 # none of it, while a person, a bag or an airframe fills a good half.
 MIN_BOX_EXTENT = env_float("ASTRAVIGIL_OPTICAL_MIN_EXTENT", 0.14)
+
+# How many robust sigma of frame noise a pixel must exceed, on top of the
+# fixed threshold above.
+#
+# The fixed threshold is a statement about the SIGNAL - eighteen grey levels
+# is a real change in the scene - and it says nothing about the sensor. In
+# good light a camera's frame-to-frame noise is well under a grey level and
+# this changes nothing. In a dark room the same sensor runs at high gain and
+# its noise floor climbs several levels, so eighteen stops being a threshold
+# and becomes a sieve: an operator gets forty boxes over an empty room, each
+# numbered, each labelled as a contact.
+#
+# So the floor rises with the measured noise. The median absolute difference
+# from the background model is a robust estimate of that noise - robust
+# because the real moving object, whatever it is, occupies a small fraction
+# of the frame and cannot drag a median. Six sigma over it is conservative:
+# on pure Gaussian noise that is one false pixel in half a billion, and a
+# single pixel is far below the minimum area anyway.
+NOISE_SIGMA = env_float("ASTRAVIGIL_OPTICAL_NOISE_SIGMA", 6.0)
 BACKGROUND_ALPHA = 0.02
 WARMUP_FRAMES = 20
 MERGE_GAP_PX = 8.0
@@ -127,6 +146,11 @@ class OpticalDetector:
         # Counted rather than silently dropped: a filter nobody can see the
         # effect of is one nobody can tell is set wrong.
         self.rejected_shape = 0
+        # The measured noise floor and the threshold it produced, both
+        # reported, so "the pane is empty" and "the camera is too noisy to
+        # see anything" are distinguishable from the console.
+        self.noise = 0.0
+        self.effective_threshold = float(threshold)
 
     @property
     def ready(self):
@@ -177,7 +201,14 @@ class OpticalDetector:
 
         signed = grey - self.background
         diff = np.abs(signed)
-        mask = (diff > self.threshold).astype(np.uint8) * 255
+        # 1.4826 * MAD is the usual robust stand-in for a standard deviation.
+        # Measured against the background model rather than against the frame,
+        # so this is the noise in what CHANGED, which is what the threshold is
+        # applied to.
+        self.noise = 1.4826 * float(np.median(diff))
+        self.effective_threshold = max(self.threshold,
+                                       NOISE_SIGMA * self.noise)
+        mask = (diff > self.effective_threshold).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         self.last_mask = mask
