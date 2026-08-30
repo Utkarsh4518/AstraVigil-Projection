@@ -51,12 +51,16 @@ class Detection:
                  # told WHY a label is what it is, rather than only what it
                  # is - a bare "unknown" is the same silence that made the
                  # previous confident answer untrustworthy.
-                 "not_airborne", "named_by_optical")
+                 "not_airborne", "named_by_optical", "optical_guess")
 
     def __init__(self, box, centroid, area, peak_c, mean_c, contrast_c,
                  aspect, extent, solidity, parts=1):
         self.not_airborne = None
         self.named_by_optical = False
+        # What the optical model called this when its answer was not trusted
+        # enough to change the label. Kept so the console can show the guess
+        # as a guess rather than throwing it away or believing it.
+        self.optical_guess = None
         self.box = box                 # (x, y, w, h)
         self.centroid = centroid       # (cx, cy) float
         self.area = area

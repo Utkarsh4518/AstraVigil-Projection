@@ -194,6 +194,30 @@ FURNITURE = frozenset({
 # Classes worth saying out loud on a counter-UAS console.
 AIRBORNE = frozenset({"airplane", "bird", "kite", "frisbee", "sports ball"})
 
+# COCO HAS NO DRONE CLASS. Eighty everyday objects, and a quadcopter is not
+# one of them, so a COCO model shown a drone cannot answer "drone" - it
+# answers with whichever of its eighty it finds least unlike, and on a real
+# rig that came back as "bowl 0.56".
+#
+# That is not a bad model. It is a model being asked a question outside the
+# set it was given, and it has no way to say so. Which means a COCO name is
+# evidence about SOME objects and no evidence at all about others, and the
+# system has to know which is which.
+#
+# These are the names allowed to overrule the thermal classifier. Every one
+# is large, static, and structurally impossible to confuse with a small
+# airframe: if the optical camera says the warm blob is sitting on a sofa,
+# the blob is not a quadcopter. Everything else - bowl, cup, frisbee, sports
+# ball, clock, vase, mouse, kite, bird - is exactly the shape a drone gets
+# read as, and is reported as optical's opinion rather than as the object's
+# identity.
+CAN_OVERRULE = frozenset({
+    "person", "chair", "couch", "bed", "dining table", "tv", "laptop",
+    "refrigerator", "oven", "microwave", "sink", "toilet", "bench",
+    "potted plant", "car", "truck", "bus", "motorcycle", "bicycle",
+    "train", "boat", "horse", "cow", "elephant", "bear", "zebra",
+    "giraffe", "dog", "cat"})
+
 
 class Recognition:
     """One named object in the optical frame."""
@@ -268,6 +292,27 @@ def download_model(url, dest, timeout=60, progress=None):
     return got
 
 
+def _load_labels(model_path):
+    """Class names for a model: its own if it has any, COCO otherwise.
+
+    Looked for as <model>.names and <model>.txt. A model trained on something
+    this system actually cares about - drones - will not have eighty everyday
+    classes, and hard-coding COCO would either crash on it or mislabel every
+    detection by an offset.
+    """
+    if model_path:
+        base = os.path.splitext(model_path)[0]
+        for ext in (".names", ".txt"):
+            try:
+                with open(base + ext, encoding="utf-8") as fh:
+                    names = [ln.strip() for ln in fh if ln.strip()]
+                if names:
+                    return tuple(names)
+            except OSError:
+                pass
+    return COCO
+
+
 def find_model():
     """The weights file to use, or None.
 
@@ -316,6 +361,11 @@ class ObjectRecogniser:
         # down. Boxes are turned back into sensor coordinates afterwards, so
         # nothing downstream needs to know this happened.
         self.rot = (OPTICAL_ROT if rot is None else rot) % 4
+        # Class names, from a sidecar file if there is one. This is what
+        # makes a model somebody trained on drones usable: drop the .onnx in
+        # with a .names beside it, one class per line, and nothing else here
+        # needs to change.
+        self.labels = _load_labels(self.path)
         self.net = None
         self.kind = None
         self.error = None
@@ -452,12 +502,13 @@ class ObjectRecogniser:
             if out.ndim != 2:
                 continue
             wide = min(out.shape)
-            if wide not in (len(COCO) + 4, len(COCO) + 5):
+            if wide not in (len(self.labels) + 4, len(self.labels) + 5):
                 # Runs, but is not a COCO YOLO. Say so once here rather than
                 # letting every frame fail the same way in the decoder.
-                self.error = (f"model output is {out.shape}, which is not a "
-                              f"COCO YOLO ({len(COCO) + 4} or "
-                              f"{len(COCO) + 5} attributes)")
+                self.error = (
+                    f"model output is {out.shape}, which does not fit "
+                    f"{len(self.labels)} class names - put a .names file "
+                    f"with one class per line beside the model")
                 self.net = None
                 return size
             return size
@@ -475,6 +526,8 @@ class ObjectRecogniser:
                 "model": os.path.basename(self.path) if self.path else None,
                 "kind": self.kind,
                 "rot": self.rot,
+                "labels": len(self.labels),
+                "coco": self.labels is COCO,
                 "error": self.error,
                 "fetch_pct": (round(self.fetch_pct, 1)
                               if self.fetch_pct is not None else None),
@@ -596,8 +649,8 @@ class ObjectRecogniser:
             # TensorFlow's COCO ids are 1-based and skip numbers; the usual
             # mapping for this family is id-1 into the 80-class list.
             idx = int(cid) - 1
-            if 0 <= idx < len(COCO):
-                out.append(Recognition(COCO[idx], score, box))
+            if 0 <= idx < len(self.labels):
+                out.append(Recognition(self.labels[idx], score, box))
         return out
 
     def _detect_onnx(self, bgr):
@@ -625,16 +678,22 @@ class ObjectRecogniser:
             pred = pred.T
         wide = pred.shape[1]
 
-        if wide == len(COCO) + 5:            # v5: cx cy w h obj cls...
-            objectness = pred[:, 4]
+        # v5 carries an objectness column, v8 does not. Told apart by which
+        # one makes the class count match the label list - and failing that,
+        # by assuming v5, which is what every export of an unusual class
+        # count in the wild has turned out to be.
+        n = len(self.labels)
+        if wide == n + 5:                    # v5: cx cy w h obj cls...
             cls = pred[:, 5:]
-            conf = objectness * cls.max(axis=1)
-        elif wide == len(COCO) + 4:          # v8: cx cy w h cls...
+            conf = pred[:, 4] * cls.max(axis=1)
+        elif wide == n + 4:                  # v8: cx cy w h cls...
             cls = pred[:, 4:]
             conf = cls.max(axis=1)
         else:
-            raise ValueError(f"output has {wide} columns, which is neither "
-                             f"{len(COCO) + 4} nor {len(COCO) + 5}")
+            raise ValueError(
+                f"output has {wide} columns, which fits neither {n + 4} nor "
+                f"{n + 5} for {n} labels - put a .names file with one class "
+                f"per line beside the model")
 
         keep = conf >= self.conf
         if not keep.any():
@@ -659,7 +718,7 @@ class ObjectRecogniser:
             bw_, bh_ = min(bw_, w - x), min(bh_, h - y)
             if bw_ < 2 or bh_ < 2:
                 continue
-            out.append(Recognition(COCO[int(ids[i])], conf[i],
+            out.append(Recognition(self.labels[int(ids[i])], conf[i],
                                    (x, y, bw_, bh_)))
         return out
 

@@ -18,7 +18,29 @@ recogniser takes the first .onnx it finds.
 To export one yourself on a machine that has torch:
 
     pip install ultralytics
-    yolo export model=yolov8n.pt format=onnx imgsz=320 opset=12
+    yolo export model=yolov8n.pt format=onnx imgsz=640 opset=12
+
+A MODEL THAT KNOWS WHAT A DRONE IS
+
+The models above are COCO, and COCO has eighty everyday objects with no
+quadcopter among them. Shown a drone, they answer with whichever class they
+find least unlike it - "bowl" and "frisbee" are the usual ones - so their
+names are treated as evidence about furniture and as no evidence at all about
+aircraft. Nothing here will ever announce a drone, and that is deliberate.
+
+To use one trained on drones, put the .onnx in data/models/ and a .names file
+beside it with the same stem, one class per line:
+
+    data/models/drone.onnx
+    data/models/drone.names     ->  drone
+                                    bird
+                                    balloon
+
+Any class count works; the decoder reads the label file rather than assuming
+COCO. Then point at it explicitly so the COCO models do not win the
+preference order:
+
+    ASTRAVIGIL_OBJECT_MODEL=data/models/drone.onnx
 """
 import argparse
 import os

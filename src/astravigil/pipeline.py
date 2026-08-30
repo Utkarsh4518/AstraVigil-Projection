@@ -37,7 +37,8 @@ from .calibration import homography
 from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
-from .detection.objects import AIRBORNE, ObjectRecogniser, best_overlap
+from .detection.objects import (
+    CAN_OVERRULE, ObjectRecogniser, best_overlap)
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -478,18 +479,35 @@ class Pipeline:
             # a temperature and a silhouette; "laptop" is a fact about the
             # object, and it beats every inference drawn from four pixels.
             #
-            # Only downgrades. A recognition can say "this warm thing is a
-            # chair" and take a drone label away, and it can never award one -
-            # nothing in COCO is a quadcopter, so a model that has never seen
-            # one has no standing to confirm it is looking at one.
+            # Only downgrades, and only from names that could not possibly
+            # be a drone.
+            #
+            # This was too permissive and it did real damage. COCO has no
+            # drone class, so a COCO model shown a quadcopter answers with
+            # whichever of its eighty everyday objects it finds least unlike
+            # - measured on the rig, "bowl 0.56". The old rule accepted any
+            # name that was not explicitly airborne, so that guess overwrote
+            # a correct thermal verdict of "drone" with "bowl", and the one
+            # object this system exists to find was renamed into crockery by
+            # the camera that was supposed to be helping.
+            #
+            # A name may now overrule the thermal classifier only if it is
+            # something large and static that a small airframe cannot be
+            # confused with - a sofa, a car, a person. Everything else is
+            # recorded as optical's opinion and changes nothing, because a
+            # model asked a question outside its own class list has no way to
+            # say so, and a confident wrong answer is worse than no answer.
             if recognitions and self.H is not None:
                 named = best_overlap(recognitions,
                                      homography.map_box(self.H, det.box))
-                if (named is not None
-                        and named.confidence >= OPTICAL_NAME_TRUST
-                        and named.label not in AIRBORNE):
-                    det.label, det.confidence = named.label, named.confidence
-                    det.named_by_optical = True
+                if named is not None and named.confidence >= OPTICAL_NAME_TRUST:
+                    if named.label in CAN_OVERRULE:
+                        det.label = named.label
+                        det.confidence = named.confidence
+                        det.named_by_optical = True
+                    else:
+                        det.optical_guess = (f"{named.label} "
+                                             f"{named.confidence:.2f}")
             if tr is not None:
                 tr.label, tr.confidence = det.label, det.confidence
 
@@ -611,6 +629,13 @@ class Pipeline:
                 a.reasons = list(a.reasons) + [
                     f"optical camera recognises it as a {det.label} "
                     f"({det.confidence:.2f})"]
+            elif det.optical_guess:
+                # Said as a guess, because that is what it is. The list the
+                # optical model was trained on does not contain the thing we
+                # are looking for.
+                a.reasons = list(a.reasons) + [
+                    f"optical's nearest match is {det.optical_guess}, but "
+                    f"its class list has no drone in it - not evidence"]
             if optical_ev is not None:
                 named = None
                 if recognitions and self.H is not None:
