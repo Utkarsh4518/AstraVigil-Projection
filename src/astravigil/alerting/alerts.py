@@ -88,6 +88,9 @@ class Alert:
             "track_id": self.track_id,
             "box": list(self.box),
             "reasons": list(self.reasons),
+            "closed_hms": (time.strftime("%H:%M:%S",
+                                         time.localtime(self.closed_at))
+                           if self.closed_at else None),
             "active": self.active,
             "acked": self.acked,
             "frames": self.frames,

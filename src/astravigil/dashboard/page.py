@@ -177,6 +177,19 @@ _PAGE = r"""<!doctype html>
   .trail .t { text-align:right; font-variant-numeric:tabular-nums; }
   .trail .empty { color:var(--dim); margin:6px 0; }
 
+  /* Closed alerts. An alert that vanishes off the board with no trace makes
+     an operator doubt they saw it, and doubt is the one thing a console
+     cannot afford to produce. */
+  .hist { display:flex; gap:8px; flex-wrap:wrap; margin:-4px 0 4px; }
+  .hist .h { background:var(--panel); border:1px solid var(--line);
+             border-left:3px solid var(--line); border-radius:6px;
+             padding:4px 9px; font-size:11px; color:var(--dim);
+             font-variant-numeric:tabular-nums; }
+  .hist .h.lv-alert { border-left-color:var(--alert); }
+  .hist .h.lv-watch { border-left-color:var(--watch); }
+  .hist .h b { color:var(--fg); font-weight:600; }
+  .hist .none { color:var(--dim); font-size:11px; }
+
   /* The object number drawn on the object itself, so a row in this list and
      a badge on the picture are visibly the same thing. Deliberately NOT called
      a "cue" anywhere an operator can read: this dashboard already uses
@@ -323,7 +336,10 @@ _PAGE = r"""<!doctype html>
         been sitting there. Those two need no homography, so they are still drawn
         while the rig is calibrating — but an object seen by only one sensor
         cannot share a number with the other, because nothing yet knows they are
-        the same thing.</figcaption>
+        the same thing. Coloured labels are the object recogniser naming what is
+        in the room — those names are what answer thermal when it asks what
+        something is, and "it is a chair" beats "solidity 0.71".
+        <span id="objnote"></span></figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/optical_site" alt="optical site">
@@ -344,6 +360,9 @@ _PAGE = r"""<!doctype html>
         patch, the frame matching has drifted.</figcaption>
     </figure>
   </div>
+
+  <h2>Closed <span class="tag" id="histnote"></span></h2>
+  <div class="hist" id="hist"><span class="none">nothing has closed yet</span></div>
 
   <h2>Cross-cue — what each camera asked the other</h2>
   <div class="trail" id="trail"><p class="empty">nothing asked yet</p></div>
@@ -684,6 +703,38 @@ async function poll() {
         stack.innerHTML = html;
       }
     }
+
+    // Where an alert goes when it disappears. It closes five seconds after
+    // the object stops being seen, and every open and close is appended to
+    // the log file named beside the heading - so a board that empties is a
+    // scene that emptied, and it can be checked.
+    const hist = document.getElementById("hist");
+    const hl = stats.alert_history || [];
+    const hhtml = hl.length
+      ? hl.map(a => `<span class="h lv-${a.level}"
+             title="${esc(a.label)} — opened ${a.opened_hms}, closed ${
+               a.closed_hms || "—"}, peak threat ${fmt(a.peak_threat)}${
+               a.acked ? ", acknowledged" : ""} · ${esc(a.reasons.join(" · "))}">
+           <b>${esc(a.label)}</b> ${a.closed_hms || ""} ·
+           ${Math.round(a.duration_s)}s · peak ${fmt(a.peak_threat)}
+         </span>`).join("")
+      : '<span class="none">nothing has closed yet</span>';
+    if (hist.dataset.sig !== hhtml) {
+      hist.dataset.sig = hhtml;
+      hist.innerHTML = hhtml;
+    }
+    // Whether object naming is running at all, said out loud. A pane with no
+    // labels on it looks identical whether the model found nothing or was
+    // never installed.
+    const rec = stats.recogniser || {};
+    document.getElementById("objnote").textContent = !rec.available
+      ? (rec.error ? " — object naming off: " + rec.error : "")
+      : ` — ${rec.model} · ${(stats.objects || []).length} named · ` +
+        `${fmt(rec.last_ms, 0)} ms every ${rec.every_n} frames`;
+
+    document.getElementById("histnote").textContent = stats.alert_log
+      ? `closes 5 s after the object is last seen · logged to ${stats.alert_log}`
+      : "closes 5 s after the object is last seen";
 
     // The conversation between the two cameras. Question on the left,
     // answer in the middle, the threat it produced on the right - so the

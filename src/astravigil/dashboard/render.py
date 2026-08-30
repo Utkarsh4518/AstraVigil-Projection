@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from ..calibration import homography
+from ..detection.objects import colour_for as object_colour
 from ..site_intelligence.optical_baseline import (
     ACTIVITY_FLOOR, ACTIVITY_FULL, Z_ANOMALOUS)
 from ..utils.env import env_int
@@ -147,6 +148,53 @@ def _rot_box(box, w, h, k=None):
     ax, ay = _rot_point(x, y, w, h, k)
     bx, by = _rot_point(x + max(bw - 1, 0), y + max(bh - 1, 0), w, h, k)
     return min(ax, bx), min(ay, by), abs(bx - ax) + 1, abs(by - ay) + 1
+
+
+def _chip(img, text, x, y, col, scale=0.42):
+    """A filled label, the way an object detector draws one.
+
+    Filled rather than outlined, and in the class colour with dark text on
+    it. There can be a dozen of these on one frame and they overlap the
+    boxes they belong to; outlined text on a busy optical scene is the
+    difference between a readable pane and a mess.
+    """
+    (tw, th), _ = cv2.getTextSize(text, FONT, scale, 1)
+    w, h = tw + 8, th + 8
+    x = int(max(0, min(x, img.shape[1] - w)))
+    y = int(max(0, min(y, img.shape[0] - h)))
+    cv2.rectangle(img, (x, y), (x + w, y + h), col, -1)
+    cv2.putText(img, text, (x + 4, y + h - 5), FONT, scale, (16, 16, 20), 1,
+                cv2.LINE_AA)
+
+
+def _draw_recognitions(img, result, fw, fh):
+    """Everything the optical recogniser could name.
+
+    Drawn under the threat boxes on purpose. These are context - what is in
+    the room - and the threat boxes are the claim on the operator's
+    attention; if the two overlap, the claim must win.
+    """
+    found = getattr(result, "recognitions", None) or ()
+    for r in found:
+        rx, ry, rw, rh = _rot_box(r.box, fw, fh, OPTICAL_VIEW_ROT)
+        col = object_colour(r.label)
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), col, 2)
+        _chip(img, f"{r.label} {r.confidence:.2f}", rx, ry - 16, col)
+    return len(found)
+
+
+def _objects_note(result):
+    """What to add to the optical banner about naming."""
+    st = getattr(result, "recogniser_stats", None) or {}
+    if not st:
+        return ""
+    if not st.get("available"):
+        # Named rather than silent. A pane that simply has no labels on it
+        # looks like a pane whose model found nothing, and the operator has
+        # no way to tell that apart from a model that was never installed.
+        return "  no object model"
+    n = len(getattr(result, "recognitions", None) or ())
+    return f"  {n} named ({st.get('last_ms', 0):.0f} ms)"
 
 
 def _cues(result):
@@ -315,8 +363,10 @@ def optical_view(result, H):
         # a pane that says what this camera can see unaided and a pane that is
         # blank until somebody calibrates the rig.
         img = _rot_image(img, OPTICAL_VIEW_ROT)
+        _draw_recognitions(img, result, fw, fh)
         _draw_optical_own(img, result, fw, fh)
-        _banner(img, _uncalibrated_banner(result, "OPTICAL"))
+        _banner(img, _uncalibrated_banner(result, "OPTICAL")
+                + _objects_note(result))
         return img
 
     seen = assessment_map(result)
@@ -348,9 +398,11 @@ def optical_view(result, H):
     img = _rot_image(img, OPTICAL_VIEW_ROT)
 
     cues = _cues(result)
-    # Optical's own contacts and settled patches, on the same pane as the
-    # mapped thermal ones, so a numbered box that appears on only one of the
-    # two sensors is visibly that rather than an omission.
+    # What the room contains, first and underneath. Then optical's own
+    # contacts and settled patches, on the same pane as the mapped thermal
+    # ones, so a numbered box that appears on only one of the two sensors is
+    # visibly that rather than an omission.
+    _draw_recognitions(img, result, fw, fh)
     _draw_optical_own(img, result, fw, fh)
 
     for box, det, a, col in mapped:
@@ -373,9 +425,8 @@ def optical_view(result, H):
 
     c = result.cross or {}
     _banner(img, f"OPTICAL - {c.get('paired_with_thermal', 0)} paired with "
-                 f"thermal, {c.get('optical_only', 0)} optical-only, "
-                 f"{c.get('shape_usable', 0)}/{c.get('shape_checks', 0)} "
-                 f"shape checks usable")
+                 f"thermal, {c.get('optical_only', 0)} optical-only"
+                 + _objects_note(result))
     return img
 
 

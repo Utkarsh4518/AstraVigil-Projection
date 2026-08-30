@@ -65,6 +65,18 @@ USER_AGENT = os.environ.get("FEATHERLESS_USER_AGENT", "AstraVigil/1.0")
 # time we are allowed to ask about that track again the object has usually
 # gone.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Statuses that mean "not this model" rather than "not this request", and so
+# are worth trying the next candidate for.
+#
+# 400 belongs here for the text-only call and NOT for the call carrying
+# images. Featherless answers 400 both for a model it does not host and for a
+# model that cannot read an image, and the two need opposite responses:
+# dropping the images is much more likely to succeed than working down a list
+# of models that will all reject them the same way. So the image call raises
+# at once and lets the caller strip the images, and only the text-only retry
+# walks the fallback list.
+MODEL_FALLBACK_STATUSES = frozenset({400, 404, 422})
 RETRIES = env_int("FEATHERLESS_RETRIES", 2)
 RETRY_BACKOFF_S = env_float("FEATHERLESS_RETRY_BACKOFF_S", 2.0)
 
@@ -80,11 +92,56 @@ FALLBACK_MODELS = tuple(
     os.environ.get("FEATHERLESS_FALLBACK_MODELS", "").split(",") if m.strip())
 
 
+def _http_detail(exc):
+    """The server's explanation, which urllib throws away by default.
+
+    `HTTP Error 400: Bad Request` is a status line, not a diagnosis. The body
+    underneath it says whether the model does not exist, the key has no access
+    to it, the context was too long, or images are not supported - four
+    different problems with four different fixes, all reported identically
+    until somebody reads the body.
+    """
+    try:
+        raw = exc.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        obj = json.loads(raw)
+        err = obj.get("error", obj)
+        if isinstance(err, dict):
+            raw = str(err.get("message") or err.get("detail") or err)
+        else:
+            raw = str(err)
+    except ValueError:
+        pass
+    raw = " ".join(raw.split())
+    return raw[:300]
+
+
+class ApiError(RuntimeError):
+    """An HTTP failure that carries what the server actually said."""
+
+    def __init__(self, code, detail, model=None):
+        self.code = code
+        self.detail = detail
+        self.model = model
+        where = f" [{model}]" if model else ""
+        super().__init__(f"HTTP {code}{where}"
+                         + (f" - {detail}" if detail else ""))
+
+
 def _headers(api_key):
     return {"Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
             "Authorization": f"Bearer {api_key}"}
+# Reply budget. Small models often cap total context well below what a
+# generous default implies, and a max_tokens above that cap is answered with
+# a 400 that names no model and looks exactly like every other 400.
+MAX_TOKENS = env_int("FEATHERLESS_MAX_TOKENS", 400)
+
 TIMEOUT_S = 45.0
 COOLDOWN_S = 60.0          # per object, so one track cannot spam the API
 MIN_GAP_S = 6.0            # global floor between any two calls
@@ -221,7 +278,7 @@ class FeatherlessClient:
     def configured(self):
         return bool(self.api_key)
 
-    def _post(self, payload):
+    def _post(self, payload, model_fallback=(404,)):
         """One chat completion, with retries and model fallback.
 
         Retryable statuses are retried on the same model first, because a
@@ -229,8 +286,10 @@ class FeatherlessClient:
         that was chosen. Only once that is exhausted - or the model turns out
         not to exist - do we move down FALLBACK_MODELS.
 
-        Anything else is raised immediately and unchanged, so the caller's
-        4xx handling still gets to strip the images and try text-only.
+        Anything else is raised immediately, so the caller's 4xx handling
+        still gets to strip the images and try text-only. It is raised as an
+        ApiError carrying the server's own explanation: the status line on its
+        own sent an operator looking at a key that was fine.
         """
         wanted = payload["model"]
         candidates = [wanted] + [m for m in FALLBACK_MODELS if m != wanted]
@@ -251,7 +310,10 @@ class FeatherlessClient:
                     self.model_used = model
                     return got["choices"][0]["message"]["content"]
                 except urllib.error.HTTPError as exc:
-                    last = exc
+                    # Read the body HERE. The connection is closed once the
+                    # exception escapes this block, and with it the only
+                    # description of what went wrong.
+                    last = ApiError(exc.code, _http_detail(exc), model)
                     if exc.code in RETRY_STATUSES and attempt < RETRIES:
                         time.sleep(RETRY_BACKOFF_S * (attempt + 1))
                         continue
@@ -268,7 +330,7 @@ class FeatherlessClient:
                     break
             code = getattr(last, "code", None)
             if code is not None and code not in RETRY_STATUSES \
-                    and code != 404:
+                    and code not in model_fallback:
                 raise last
         raise last
 
@@ -289,21 +351,26 @@ class FeatherlessClient:
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                          {"role": "user", "content": content}],
-            "max_tokens": 400,
+            "max_tokens": MAX_TOKENS,
             "temperature": 0.2,
         }
         return self._post(payload)
 
     def identify_text_only(self, features):
-        """Fallback for models that reject image content."""
+        """Fallback for models that reject image content.
+
+        This one DOES walk the fallback list on a 400. By the time we are
+        here the images are already gone, so a 400 that survives is about the
+        model rather than the request, and the next candidate is worth a try.
+        """
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                          {"role": "user", "content": describe(features)}],
-            "max_tokens": 400,
+            "max_tokens": MAX_TOKENS,
             "temperature": 0.2,
         }
-        return self._post(payload)
+        return self._post(payload, model_fallback=MODEL_FALLBACK_STATUSES)
 
 
 def _parse(text):
@@ -417,6 +484,12 @@ class Escalator:
         self._lock = threading.Lock()
         self.calls = 0
         self.failures = 0
+        # How often images had to be dropped, and the last thing the server
+        # said when something failed. Both are shown on the dashboard: a
+        # failure an operator cannot read the reason for is one they cannot
+        # act on.
+        self.image_rejections = 0
+        self.last_error = None
         # Watched whether or not escalation is switched on. An operator wants
         # to know the link is up before they turn anything on, and finding out
         # only at the moment a drone needs identifying is finding out too late.
@@ -429,6 +502,8 @@ class Escalator:
                 "configured": self.client.configured,
                 "model": self.client.model,
                 "calls": self.calls, "failures": self.failures,
+                "image_rejections": self.image_rejections,
+                "last_error": self.last_error,
                 "pending": len(self.pending),
                 "results": len(self.results),
                 "net": self.net.status()}
@@ -474,12 +549,14 @@ class Escalator:
             try:
                 try:
                     text = self.client.identify(features, tc, oc)
-                except urllib.error.HTTPError as exc:
+                except (ApiError, urllib.error.HTTPError) as exc:
                     # Plenty of hosted models are text-only and reject image
                     # content with a 4xx. Retry without the images rather than
                     # reporting a failure - the measurements alone carry most
                     # of what discriminates at these ranges.
-                    if 400 <= exc.code < 500:
+                    code = getattr(exc, "code", 0)
+                    if 400 <= code < 500 and code not in (401, 403):
+                        self.image_rejections += 1
                         text = self.client.identify_text_only(features)
                     else:
                         raise
@@ -489,7 +566,10 @@ class Escalator:
                 self.calls += 1
             except Exception as exc:                    # never kill the thread
                 self.failures += 1
-                ident = Identification(key, ok=False, error=f"{type(exc).__name__}: {exc}",
+                detail = (str(exc) if isinstance(exc, ApiError)
+                          else f"{type(exc).__name__}: {exc}")
+                self.last_error = detail
+                ident = Identification(key, ok=False, error=detail,
                                        model=self.client.model,
                                        latency_s=time.monotonic() - t0)
             self.results[key] = ident

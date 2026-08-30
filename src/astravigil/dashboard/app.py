@@ -200,6 +200,10 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             "learning": result.learning,
             "escalation": result.escalation,
             "alerts": len(result.alerts),
+            "alert_history": result.alert_history,
+            "alert_log": getattr(pipeline.alerts, "log_path", None),
+            "recogniser": result.recogniser_stats,
+            "objects": [r.as_dict() for r in result.recognitions],
             # What drawing currently costs, and what it is drawing. Zero when
             # nobody has the page open, which is the point.
             "render_ms": round(render_ms, 2),

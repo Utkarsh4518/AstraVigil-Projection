@@ -37,6 +37,7 @@ from .calibration import homography
 from .classification.rules import classify
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
+from .detection.objects import ObjectRecogniser, best_overlap
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -68,7 +69,8 @@ ESCALATE_COLD_DWELL_S = 20.0
 class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
-                 "healthy", "assessments", "alerts", "static_anomalies",
+                 "healthy", "assessments", "alerts", "alert_history",
+                 "recognitions", "recogniser_stats", "static_anomalies",
                  "site_stats", "optical_site_stats", "cross_log",
                  "cue_numbers", "optical_cues", "optical_regions", "novelty",
                  "optical_detections",
@@ -98,10 +100,17 @@ class Result:
 
         self.assessments = []       # one verdict per object, both paths
         self.alerts = []            # currently open alerts
+        # Alerts that have closed, newest first. An operator watching an alert
+        # vanish off the board has no way to tell "the object left" from "the
+        # console dropped it", and the difference is the whole credibility of
+        # the thing. The manager has kept these all along; nothing showed them.
+        self.alert_history = []
         self.static_anomalies = []
         self.site_stats = {}
         self.novelty = None         # cell z-map upsampled to frame size
 
+        self.recognitions = []         # named objects in the optical frame
+        self.recogniser_stats = {}
         self.optical_detections = []   # what the optical camera found alone
         self.optical_evidence = {}     # track_id -> optical's shape answer
         self.cross = {}                # cue counts, for the dashboard
@@ -121,7 +130,7 @@ class Pipeline:
                  alerts=None, fps=25.0, clock="wall", learn=True,
                  cross_cue=True, optical_every_n=3, escalator=None,
                  escalate_at=0.75, policy=None, auto_calibrate=True,
-                 calibration_path=None, min_area=None):
+                 calibration_path=None, min_area=None, recogniser=None):
         self.source = source
         self.H = H
         # Authored site policy - what is ALLOWED here, as opposed to what the
@@ -136,6 +145,11 @@ class Pipeline:
         # every frame: it is the primary sensor and it is the cheap one.
         self.cross_cue = cross_cue
         self.optical = OpticalDetector(every_n=optical_every_n)
+        # Names for what the optical camera is looking at. Optional and
+        # self-disabling: with no weights file this reports nothing and every
+        # path below falls back to the geometry it used before.
+        self.recogniser = (recogniser if recogniser is not None
+                           else ObjectRecogniser())
         self.optical_contacts = OpticalContactLog()
         # Remote identification, off unless a key is configured and it is
         # explicitly switched on. Nothing downstream depends on it.
@@ -254,14 +268,24 @@ class Pipeline:
         })
 
     @staticmethod
-    def _optical_answer(ev):
-        """What optical said back, in words rather than fields."""
+    def _optical_answer(ev, named=None):
+        """What optical said back, in words rather than fields.
+
+        A name goes first when there is one. "solidity 0.71, aspect 1.30" is
+        the honest measurement and it is not an answer to "what is it" - a
+        quadcopter and the back of a chair produce nearly the same numbers,
+        which is the whole reason the question is being asked.
+        """
+        head = (f"it is a {named.label} ({named.confidence:.2f})"
+                if named is not None else None)
         if ev is None:
-            return "not asked"
+            return head or "not asked"
         if not ev.found:
-            return ev.reason or "nothing there"
+            return head or ev.reason or "nothing there"
         shape = (f"solidity {ev.solidity:.2f}, aspect {ev.aspect:.2f}, "
                  f"{int(ev.pixels)} px")
+        if head:
+            return f"{head} - {shape}"
         if ev.label and ev.label != "unknown":
             return f"looks like {ev.label} ({ev.confidence:.2f}) - {shape}"
         return f"shape unclear - {shape}"
@@ -390,6 +414,13 @@ class Pipeline:
             if self._optical_tick % max(1, self.optical.every_n) == 0:
                 optical_z = self.optical_site.observe(optical, learn=self.learn)
 
+        # Naming runs on the optical frame at its own reduced rate. Placed
+        # before assessment so the names are available to answer with, not
+        # after, when they would be a frame stale and useless for the cue
+        # they exist to serve.
+        recognitions = self.recogniser.update(optical) if optical is not None \
+            else []
+
         self.site.observe(res.thermal_c, tracks,
                           exclude_ids=self._alerting, learn=self.learn)
         if self.learn:
@@ -443,11 +474,15 @@ class Pipeline:
             a = assess_track(det, tr, novelty, dwell_s, optical_ev,
                              judgement=judgement)
             if optical_ev is not None:
+                named = None
+                if recognitions and self.H is not None:
+                    named = best_overlap(
+                        recognitions, homography.map_box(self.H, det.box))
                 self._note_cross(
                     "thermal asks optical", a.key, a.label,
                     f"warm mover, {det.peak_c:.1f} C peak, "
                     f"{det.contrast_c:+.1f} C above background - what is it?",
-                    self._optical_answer(optical_ev), a.threat)
+                    self._optical_answer(optical_ev, named), a.threat)
             self._maybe_escalate(a, det, tr, res, optical_ev)
             assessments.append(a)
 
@@ -467,6 +502,12 @@ class Pipeline:
                 confirmed += 1
             key = self.optical_contacts.key_for(odet.centroid)
             oa = assess_optical_only(odet, th, key, dwells.get(key, 0.0))
+            named = best_overlap(recognitions, odet.box)
+            if named is not None:
+                oa.label = named.label
+                oa.reasons = list(oa.reasons) + [
+                    f"optical recognises it as a {named.label} "
+                    f"({named.confidence:.2f})"]
             assessments.append(oa)
             # Keyed by box because an optical detection has no id of its own
             # and the renderer has only the detection in hand.
@@ -521,11 +562,23 @@ class Pipeline:
                 th = (verify_thermal(res.thermal_c, self.H, r.box)
                       if self.H is not None else None)
                 ra = assess_optical_only(r, th, r.key, r.dwell_s)
+                named = best_overlap(recognitions, r.box)
+                if named is not None:
+                    # Say what it is in the verdict itself. An operator
+                    # reading "settled object, 90 s" has to go and look; one
+                    # reading "handbag (0.81)" already knows.
+                    ra.label = named.label
+                    ra.reasons = list(ra.reasons) + [
+                        f"optical recognises it as a {named.label} "
+                        f"({named.confidence:.2f})"]
                 assessments.append(ra)
                 self._note_cross(
                     "optical asks thermal", r.key, ra.label,
-                    f"this patch has not looked right for {r.dwell_s:.0f} s "
-                    f"and nothing moved - is anything warm there?",
+                    (f"a {named.label} has been sitting here for "
+                     f"{r.dwell_s:.0f} s - is it warm?" if named is not None
+                     else f"this patch has not looked right for "
+                          f"{r.dwell_s:.0f} s and nothing moved - is "
+                          f"anything warm there?"),
                     self._thermal_answer(th), ra.threat)
                 self._maybe_escalate_optical(ra, r.box, res, th,
                                              "settled optical patch")
@@ -543,6 +596,8 @@ class Pipeline:
         res.tracks = tracks
         res.mask = self.detector.last_mask
         res.optical_detections = optical_dets
+        res.recognitions = recognitions
+        res.recogniser_stats = self.recogniser.stats()
         res.optical_evidence = evidence
         res.optical_roi = self.optical.roi
         res.cross = {
@@ -583,6 +638,7 @@ class Pipeline:
             if self.escalator.result_for(a.key) is not None}
         res.escalation = self.escalator.status()
         res.alerts = self.alerts.update(assessments, now)
+        res.alert_history = self.alerts.history(now)
 
         res.frame_index = self.frame_index
         self._alerting = {a.track_id for a in assessments
