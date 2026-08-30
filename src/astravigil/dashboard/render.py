@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from ..calibration import homography
+from ..detection.objects import best_overlap
 from ..detection.objects import colour_for as object_colour
 from ..site_intelligence.optical_baseline import (
     ACTIVITY_FLOOR, ACTIVITY_FULL, Z_ANOMALOUS)
@@ -195,15 +196,20 @@ def _clutter_note(result):
 
 
 def _objects_note(result):
-    """What to add to the optical banner about naming."""
+    """What to add to the optical banner about naming.
+
+    Three states, not two. A pane with no labels on it looks identical
+    whether the model found nothing, is still arriving, or could not be
+    fetched at all - and those want three different reactions from whoever
+    is standing in front of it.
+    """
     st = getattr(result, "recogniser_stats", None) or {}
     if not st:
         return ""
+    if st.get("fetch_pct") is not None:
+        return f"  fetching object model {st['fetch_pct']:.0f}%"
     if not st.get("available"):
-        # Named rather than silent. A pane that simply has no labels on it
-        # looks like a pane whose model found nothing, and the operator has
-        # no way to tell that apart from a model that was never installed.
-        return "  no object model"
+        return f"  no object model: {st.get('error') or 'unavailable'}"
     n = len(getattr(result, "recognitions", None) or ())
     return f"  {n} named ({st.get('last_ms', 0):.0f} ms)"
 
@@ -324,6 +330,21 @@ def _uncalibrated_banner(result, what):
     return f"{what} - auto-calibrating: {auto['reason']}"
 
 
+def _own_label(named, box, fallback):
+    """What to write on one of optical's own contacts.
+
+    The name, whenever the recogniser can supply one. "OPTICAL ONLY" says
+    which sensor found it, which the colour already says, and says nothing
+    about what it is - and what it is was the entire point of adding a
+    recogniser. The sensor is still legible from the box colour and the
+    banner counts it, so nothing is lost by putting the useful half of the
+    label where the operator is looking.
+    """
+    hit = best_overlap(named, box)
+    return (f"{hit.label} {hit.confidence:.2f}" if hit is not None
+            else fallback)
+
+
 def _draw_optical_own(img, result, fw, fh, scale=1, labels=True):
     """What the optical camera has without any help from thermal.
 
@@ -343,6 +364,7 @@ def _draw_optical_own(img, result, fw, fh, scale=1, labels=True):
     """
     cues = _cues(result)
     ocues = getattr(result, "optical_cues", None) or {}
+    named = getattr(result, "recognitions", None) or ()
     # Thinner on the site pane, which already draws these patches as cell
     # contours - there the rectangle is only there to hang the number on.
     weight = 2 if labels else 1
@@ -353,14 +375,16 @@ def _draw_optical_own(img, result, fw, fh, scale=1, labels=True):
                           _rot_box(od.box, fw, fh, OPTICAL_VIEW_ROT)]
         cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_OPTICAL, weight)
         _mark(img, ocues.get(tuple(od.box)),
-              "OPTICAL ONLY" if labels else "", rx, ry - 19, COL_OPTICAL, 0.45)
+              _own_label(named, od.box, "OPTICAL ONLY") if labels else "",
+              rx, ry - 19, COL_OPTICAL, 0.45)
 
     for r in getattr(result, "optical_regions", None) or []:
         rx, ry, rw, rh = [v * scale for v in
                           _rot_box(r.box, fw, fh, OPTICAL_VIEW_ROT)]
         cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_SETTLED, weight)
         _mark(img, cues.get(r.key),
-              f"SETTLED {r.dwell_s:.0f}s" if labels else "",
+              _own_label(named, r.box, f"SETTLED {r.dwell_s:.0f}s")
+              if labels else "",
               rx, ry - 19, COL_SETTLED, 0.45)
 
 

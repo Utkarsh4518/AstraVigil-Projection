@@ -25,22 +25,17 @@ import os
 import sys
 import time
 import urllib.error
-import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 DEST_DIR = "data/models"
 
-# The yolov5 v7.0 release ships ready-made ONNX at three sizes, all verified
-# reachable and all decoded by the recogniser without configuration. Larger
-# is more accurate and proportionally slower, and since this runs on a
-# throttle rather than per frame, a Pi with headroom can afford `s`.
-RELEASE = "https://github.com/ultralytics/yolov5/releases/download/v7.0/"
-SIZES = {
-    "n": ("yolov5n.onnx", "4 MB, fastest, fewest names"),
-    "s": ("yolov5s.onnx", "15 MB, noticeably better - try this first on a PC"),
-    "m": ("yolov5m.onnx", "43 MB, best, slow on a Pi"),
-}
+# The addresses and the downloader both live in the module, because the rig
+# fetches this by itself on first run and there must be exactly one answer to
+# "where does the model come from". This script is for choosing a different
+# size, re-fetching, and testing what is installed.
+from astravigil.detection.objects import (       # noqa: E402
+    RELEASE, SIZES, download_model)
 
 # Tried in order. Mirrors move and repositories are renamed, so this is a list
 # of candidates rather than one address, and a failure here is inconvenient
@@ -51,36 +46,19 @@ CANDIDATES = [
      "https://huggingface.co/Xenova/yolov8n/resolve/main/onnx/model.onnx"),
 ]
 
-UA = {"User-Agent": "AstraVigil/1.0"}
-
-
 def human(n):
     return f"{n / 1e6:.1f} MB" if n else "unknown size"
 
 
 def download(url, dest, timeout=60):
-    req = urllib.request.Request(url, headers=UA)
-    tmp = dest + ".part"
+    def progress(got, total):
+        if total:
+            print(f"\r  {100.0 * got / total:5.1f}%  {human(got)} of "
+                  f"{human(total)}", end="", flush=True)
+
     t0 = time.monotonic()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        total = int(r.headers.get("Content-Length") or 0)
-        got = 0
-        with open(tmp, "wb") as f:
-            while True:
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if total:
-                    pct = 100.0 * got / total
-                    print(f"\r  {pct:5.1f}%  {human(got)} of {human(total)}",
-                          end="", flush=True)
+    got = download_model(url, dest, timeout=timeout, progress=progress)
     print()
-    if got < 100000:
-        os.remove(tmp)
-        raise OSError(f"only {got} bytes - that is not a model")
-    os.replace(tmp, dest)
     return got, time.monotonic() - t0
 
 

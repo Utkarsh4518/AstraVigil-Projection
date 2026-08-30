@@ -35,7 +35,10 @@ that cannot name a chair.
 """
 import glob
 import os
+import threading
 import time
+import urllib.error
+import urllib.request
 import zlib
 
 import cv2
@@ -48,6 +51,27 @@ from ..utils.env import env_float, env_int
 # copy onto a Pi without also finding a matching text config.
 MODEL_DIR = os.environ.get("ASTRAVIGIL_MODEL_DIR", "data/models")
 MODEL_PATH = os.environ.get("ASTRAVIGIL_OBJECT_MODEL", "")
+
+# Where the default weights come from, and whether to go and get them.
+#
+# Fetching automatically rather than printing an instruction. The alternative
+# was tried: the pane said "run scripts/fetch_object_model.py", and the rig
+# ran for two more sessions with the naming switched off and an operator
+# asking why the objects had no names. A 4 MB download that happens once, in
+# the background, on a machine that is already on the network is not a
+# decision worth interrupting somebody for.
+#
+# Set ASTRAVIGIL_OBJECT_AUTOFETCH=0 on an air-gapped rig, or where a
+# particular model has been chosen deliberately.
+RELEASE = "https://github.com/ultralytics/yolov5/releases/download/v7.0/"
+SIZES = {
+    "n": ("yolov5n.onnx", "4 MB, fastest, fewest names"),
+    "s": ("yolov5s.onnx", "15 MB, noticeably better - try this first on a PC"),
+    "m": ("yolov5m.onnx", "43 MB, best, slow on a Pi"),
+}
+DEFAULT_MODEL = SIZES[os.environ.get("ASTRAVIGIL_OBJECT_SIZE", "n")][0]
+AUTOFETCH = env_int("ASTRAVIGIL_OBJECT_AUTOFETCH", 1) != 0
+USER_AGENT = "AstraVigil/1.0"
 
 # Square input the image is letterboxed into, PREFERRED rather than fixed.
 #
@@ -140,6 +164,35 @@ class Recognition:
         return f"<{self.label} {self.confidence:.2f} {self.box}>"
 
 
+def download_model(url, dest, timeout=60, progress=None):
+    """Fetch one weights file, reporting progress, leaving no half-file.
+
+    Downloads to a .part and renames, so an interrupted fetch cannot leave
+    something that looks like a model and fails at load - which on a sensor
+    that starts unattended is a much worse outcome than no model at all.
+    """
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    tmp = dest + ".part"
+    got = 0
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        total = int(r.headers.get("Content-Length") or 0)
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if progress:
+                    progress(got, total)
+    if got < 100000:
+        os.remove(tmp)
+        raise OSError(f"only {got} bytes - that is not a model")
+    os.replace(tmp, dest)
+    return got
+
+
 def find_model():
     """The weights file to use, or None.
 
@@ -170,7 +223,7 @@ class ObjectRecogniser:
     """
 
     def __init__(self, path=None, conf=CONF_MIN, nms=NMS_IOU,
-                 size=INPUT_SIZE, every_n=EVERY_N):
+                 size=INPUT_SIZE, every_n=EVERY_N, autofetch=None):
         self.path = path if path is not None else find_model()
         self.conf = float(conf)
         self.nms = float(nms)
@@ -181,13 +234,52 @@ class ObjectRecogniser:
         self.error = None
         self.runs = 0
         self.last_ms = 0.0
+        self.fetch_pct = None
         self._tick = 0
         self._last = []
         if self.path:
             self._load()
-        else:
-            self.error = (f"no model file in {MODEL_DIR} - "
-                          f"run scripts/fetch_object_model.py")
+            return
+        self.error = f"no model file in {MODEL_DIR}"
+        # Only when nothing was named explicitly. Someone who passed a path
+        # meant that path, and quietly substituting a different model for one
+        # they chose would be worse than failing.
+        want = AUTOFETCH if autofetch is None else autofetch
+        if want and path is None and not MODEL_PATH:
+            self._start_fetch()
+
+    # --------------------------------------------------------------- fetch
+    def _start_fetch(self):
+        dest = os.path.join(MODEL_DIR, DEFAULT_MODEL)
+        self.fetch_pct = 0.0
+        self.error = f"downloading {DEFAULT_MODEL}"
+
+        def run():
+            def progress(got, total):
+                self.fetch_pct = (100.0 * got / total) if total else None
+
+            try:
+                download_model(RELEASE + DEFAULT_MODEL, dest,
+                               progress=progress)
+            except (urllib.error.URLError, OSError) as exc:
+                # Never fatal. The sensor's job does not depend on knowing
+                # the word "chair", and a rig with no route to the internet
+                # must still run exactly as it did before.
+                self.fetch_pct = None
+                self.error = (f"could not fetch {DEFAULT_MODEL} "
+                              f"({getattr(exc, 'reason', exc)}) - copy any "
+                              f"COCO YOLO .onnx into {MODEL_DIR}/")
+                return
+            self.fetch_pct = None
+            self.path = dest
+            self.error = None
+            self._load()
+            print(f"object naming: fetched {dest}"
+                  if self.available else
+                  f"object naming: fetched {dest} but {self.error}")
+
+        threading.Thread(target=run, daemon=True,
+                         name="astravigil-model-fetch").start()
 
     # ---------------------------------------------------------------- load
     def _load(self):
@@ -265,6 +357,8 @@ class ObjectRecogniser:
                 "model": os.path.basename(self.path) if self.path else None,
                 "kind": self.kind,
                 "error": self.error,
+                "fetch_pct": (round(self.fetch_pct, 1)
+                              if self.fetch_pct is not None else None),
                 "runs": self.runs,
                 "last_ms": round(self.last_ms, 1),
                 "objects": len(self._last),
