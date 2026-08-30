@@ -59,6 +59,13 @@ DEST_DIR = "data/models"
 from astravigil.detection.objects import (       # noqa: E402
     RELEASE, SIZES, download_model)
 
+# A model that has actually seen a quadcopter. YOLOv5, 416px input, ONE
+# class - so it can say "drone", which no COCO model can. Verified reachable
+# and verified to load and decode through cv2.dnn.
+DRONE_URL = ("https://huggingface.co/engdarwish/drone-detection-yolov5/"
+             "resolve/main/best.onnx")
+DRONE_CLASSES = ["drone"]
+
 # Tried in order. Mirrors move and repositories are renamed, so this is a list
 # of candidates rather than one address, and a failure here is inconvenient
 # rather than fatal - see the module docstring.
@@ -122,6 +129,9 @@ def check():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--drone", action="store_true",
+                    help="also fetch a drone-trained model and run it "
+                         "alternately with the COCO one")
     ap.add_argument("--size", choices=sorted(SIZES),
                     help="which model to fetch: "
                          + "; ".join(f"{k} = {v[1]}"
@@ -138,6 +148,30 @@ def main():
 
     if args.check:
         return check()
+
+    if args.drone:
+        os.makedirs(args.dest, exist_ok=True)
+        dest = os.path.join(args.dest, "drone.onnx")
+        if os.path.exists(dest) and not args.force:
+            print(f"already installed: {dest}")
+        else:
+            print(f"trying {DRONE_URL}")
+            try:
+                size, secs = download(DRONE_URL, dest)
+            except (urllib.error.URLError, OSError) as exc:
+                print(f"  failed: {getattr(exc, 'reason', exc)}")
+                return 1
+            print(f"saved {dest}  ({human(size)} in {secs:.0f} s)")
+        names = os.path.splitext(dest)[0] + ".names"
+        with open(names, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(DRONE_CLASSES) + "\n")
+        print(f"wrote {names}: {', '.join(DRONE_CLASSES)}")
+        print()
+        print("To run it ALONGSIDE the COCO model, set this and restart:")
+        print(f"    ASTRAVIGIL_OBJECT_MODEL2={dest}")
+        print("They take alternate passes, so this costs no extra time per "
+              "pass.")
+        return 0
 
     os.makedirs(args.dest, exist_ok=True)
     existing = [f for f in sorted(os.listdir(args.dest))

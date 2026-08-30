@@ -84,6 +84,9 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 # instead, highest threat first, which degrades sensibly in a busy room.
 SITE_BADGES = 8
 
+# Most named objects drawn on one frame.
+MAX_NAMES_DRAWN = 12
+
 
 def colour_for(label):
     return {"drone": COL_DRONE, "bird": COL_BIRD}.get(label, COL_UNKNOWN)
@@ -144,6 +147,23 @@ def _rot_box(box, w, h, k=None):
     return min(ax, bx), min(ay, by), abs(bx - ax) + 1, abs(by - ay) + 1
 
 
+def _corners(img, x, y, w, h, col, arm=14, thick=3):
+    """Corner brackets, the way a targeting overlay marks a confirmed track.
+
+    A thicker rectangle alone does not survive a busy optical scene - there
+    are already boxes on this pane in four colours. Brackets read as a
+    deliberate mark rather than as one more outline, at a glance and from
+    across a room, which is the distance a console is actually watched from.
+    """
+    a = min(arm, w // 2, h // 2)
+    if a < 3:
+        return
+    for cx, dx in ((x, 1), (x + w, -1)):
+        for cy, dy in ((y, 1), (y + h, -1)):
+            cv2.line(img, (cx, cy), (cx + dx * a, cy), col, thick)
+            cv2.line(img, (cx, cy), (cx, cy + dy * a), col, thick)
+
+
 def _chip(img, text, x, y, col, scale=0.42):
     """A filled label, the way an object detector draws one.
 
@@ -169,6 +189,12 @@ def _draw_recognitions(img, result, fw, fh):
     attention; if the two overlap, the claim must win.
     """
     found = getattr(result, "recognitions", None) or ()
+    # Highest confidence first, and capped. Two models each holding their
+    # names for twelve seconds can put a lot of boxes on one frame, and a
+    # pane that names everything is the same unreadable pane as one that
+    # names nothing - just louder.
+    found = sorted(found, key=lambda r: r.confidence,
+                   reverse=True)[:MAX_NAMES_DRAWN]
     for r in found:
         rx, ry, rw, rh = _rot_box(r.box, fw, fh, OPTICAL_VIEW_ROT)
         col = object_colour(r.label)
@@ -534,14 +560,27 @@ def overlay_view(result, H, alpha=0.6):
     # place.
     cues = _cues(result)
     seen = assessment_map(result)
+    alerts = 0
     for box, det in boxes:
         a = seen.get(det.track_id)
         if not _worth_drawing(a):
             continue
         rx, ry, rw, rh = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
         col = colour_for_level(a.level if a else "nominal")
-        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), col, 1)
-        _mark(img, cues.get(f"track:{det.track_id}"), "", rx, ry - 19, col)
+        alerting = a is not None and a.level == "alert"
+        # A confirmed alert is the one thing on this pane that must not be
+        # read as decoration. It is the case the whole registration check
+        # exists to serve - both cameras agreeing on one object - so it gets
+        # a heavier box, corner marks and its name, and everything else stays
+        # a thin outline.
+        cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), col,
+                      3 if alerting else 1)
+        if alerting:
+            alerts += 1
+            _corners(img, rx, ry, rw, rh, col)
+        _mark(img, cues.get(f"track:{det.track_id}"),
+              (f"{a.label} {a.threat:.2f} CONFIRMED" if alerting else ""),
+              rx, ry - 19, col, 0.5)
     for box, an in statics:
         rx, ry, rw, rh = _rot_box(box, fw, fh, OPTICAL_VIEW_ROT)
         cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), COL_SETTLED, 1)
@@ -550,8 +589,10 @@ def overlay_view(result, H, alpha=0.6):
     tl = corners[np.argmin(corners.sum(axis=1))]
     cv2.putText(img, "thermal FOV", tuple(tl + np.array([4, 18])),
                 FONT, 0.45, (0, 200, 200), 1, cv2.LINE_AA)
-    _banner(img, "OVERLAY - warm parts of the thermal frame, in optical "
-                 "space. They should sit on what is actually hot")
+    _banner(img, (f"OVERLAY - {alerts} CONFIRMED on both cameras"
+                  if alerts else
+                  "OVERLAY - warm parts of the thermal frame, in optical "
+                  "space. They should sit on what is actually hot"))
     return img
 
 

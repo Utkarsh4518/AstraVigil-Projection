@@ -309,7 +309,7 @@ _PAGE = r"""<!doctype html>
   <div class="stats">
     <span class="stat"><span class="dot" id="health"></span><span id="status">starting</span></span>
     <span class="stat"><span class="tag">fps</span> <b id="fps">—</b></span>
-    <span class="stat"><span class="tag">detect</span> <b id="proc">—</b> ms</span>
+    <span class="stat" id="procstat"><span class="tag">detect</span> <b id="proc">—</b> ms</span>
     <span class="stat"><span class="tag">draw</span> <b id="draw">—</b> ms</span>
     <span class="stat"><span class="tag">headroom</span> <b id="head">—</b></span>
     <span class="stat"><span class="tag">tracks</span> <b id="tracks">—</b></span>
@@ -673,6 +673,16 @@ async function poll() {
 
     document.getElementById("fps").textContent = fmt(stats.fps, 1);
     document.getElementById("proc").textContent = fmt(stats.proc_ms, 2);
+    // The breakdown on hover. A frame rate complaint needs to be answerable
+    // without guessing which stage is the expensive one.
+    const sm = stats.stage_ms || {};
+    document.getElementById("procstat").title = Object.keys(sm).length
+      ? "per frame: " + Object.entries(sm)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k} ${v} ms`).join(" · ")
+        + `\ncapture ${fmt(stats.capture_ms, 1)} ms · draw `
+        + `${fmt(stats.render_ms, 1)} ms`
+      : "";
     document.getElementById("draw").textContent =
       fmt(stats.render_ms, 2) + (stats.view_fps ? " @" + stats.view_fps + "Hz" : "");
     document.getElementById("head").textContent =

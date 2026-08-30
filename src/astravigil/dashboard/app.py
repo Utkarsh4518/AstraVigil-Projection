@@ -181,6 +181,7 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
         stats = {
             "fps": round(1.0 / mean_tick, 1) if mean_tick > 0 else 0.0,
             "proc_ms": round(result.proc_ms, 2),
+            "stage_ms": result.stage_ms,
             "capture_ms": round(result.capture_ms, 1),
             # Headroom on the PROCESSING stage only. Capture is excluded
             # because in simulation it renders a whole world and would

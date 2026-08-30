@@ -94,6 +94,21 @@ DEFAULT_MODEL = SIZES[os.environ.get("ASTRAVIGIL_OBJECT_SIZE", "s")][0]
 # possible moment, right after somebody went and got the bigger model
 # specifically because the smaller one was not working.
 MODEL_PREFERENCE = ("yolov5m.onnx", "yolov5s.onnx", "yolov5n.onnx")
+
+# A second model, run alternately with the first.
+#
+# COCO knows furniture and has never seen a quadcopter; a drone model knows
+# quadcopters and nothing else. Neither answers the other's question, so the
+# useful thing is both - and running them on alternate passes costs exactly
+# one inference per pass, the same as running one. Each set of names is held
+# for twelve seconds either way, so both stay on screen between their turns.
+MODEL2_PATH = os.environ.get("ASTRAVIGIL_OBJECT_MODEL2", "")
+DRONE_MODEL = "drone.onnx"
+
+# Class names that are direct evidence of an aircraft rather than context.
+# A model trained on drones saying "drone" is worth something; a COCO model
+# cannot produce this word at all, which is the point.
+AIRCRAFT_NAMES = frozenset({"drone", "uav", "quadcopter", "quadrotor"})
 AUTOFETCH = env_int("ASTRAVIGIL_OBJECT_AUTOFETCH", 1) != 0
 USER_AGENT = "AstraVigil/1.0"
 
@@ -455,10 +470,15 @@ class ObjectRecogniser:
                 self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
             finally:
                 quiet()
-            try:
-                cv2.setNumThreads(max(1, (os.cpu_count() or 2) - 2))
-            except Exception:
-                pass
+            # cv2.setNumThreads used to be called here to keep the DNN off
+            # every core. It is a PROCESS-WIDE setting, not a per-network
+            # one, so it also throttled the thermal detector, every resize,
+            # every morphology - the work that happens on every single frame
+            # - in order to limit something that runs once every few seconds.
+            # That is the wrong trade by two orders of magnitude in duty
+            # cycle, and it is the sort of thing that quietly halves a frame
+            # rate. Left at the default now; the inference thread is one
+            # thread among many and the scheduler can do its job.
             if self.kind == "onnx":
                 self.size = self._probe_size()
             elif self.size <= 0:

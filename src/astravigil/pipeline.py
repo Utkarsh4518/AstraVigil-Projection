@@ -38,7 +38,8 @@ from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
 from .detection.objects import (
-    CAN_OVERRULE, ObjectRecogniser, best_overlap)
+    AIRCRAFT_NAMES, CAN_OVERRULE, MODEL2_PATH, ObjectRecogniser,
+    best_overlap)
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -109,6 +110,7 @@ OPTICAL_NAME_TRUST = 0.50
 class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
+                 "stage_ms",
                  "healthy", "assessments", "alerts", "alert_history",
                  "recognitions", "recogniser_stats", "watching",
                  "static_anomalies",
@@ -136,6 +138,14 @@ class Result:
         # proc_ms is the part that carries over to the Pi.
         self.proc_ms = 0.0
         self.capture_ms = 0.0
+        # Where the frame time actually went, by stage.
+        #
+        # proc_ms is one number and a frame rate complaint needs more than
+        # one: "detection is slow" and "the site models are slow" and "the
+        # optical detector is slow" all look identical from outside, and
+        # guessing which it is from a screenshot is how an afternoon
+        # disappears. Measured, not inferred.
+        self.stage_ms = {}
         self.frame_index = 0
         self.healthy = True
 
@@ -196,6 +206,16 @@ class Pipeline:
         # path below falls back to the geometry it used before.
         self.recogniser = (recogniser if recogniser is not None
                            else ObjectRecogniser())
+        # An optional second model, taking alternate passes with the first.
+        # One knows furniture and has never seen a quadcopter; the other
+        # knows quadcopters and nothing else. Alternating costs one inference
+        # per pass either way, and the twelve-second hold keeps both sets of
+        # names on screen between their turns.
+        self.recogniser2 = None
+        if MODEL2_PATH and recogniser is None:
+            self.recogniser2 = ObjectRecogniser(path=MODEL2_PATH)
+            # Half a cycle out of step, so the two never land on one frame.
+            self.recogniser2._tick = self.recogniser2.every_n // 2
         self.optical_contacts = OpticalContactLog()
         # Remote identification, off unless a key is configured and it is
         # explicitly switched on. Nothing downstream depends on it.
@@ -460,15 +480,24 @@ class Pipeline:
         res.optical = optical
         res.thermal_c = calibrate_frame(raw)
 
+        t_stage = time.monotonic()
         detections = self.detector.update(res.thermal_c)
         tracks = self.tracker.update(detections)
+        stage = {"detect": time.monotonic() - t_stage}
+        t_stage = time.monotonic()
 
         # Naming runs on the optical frame at its own reduced rate, and runs
         # HERE - before classification, not after - because what the optical
         # camera can see is evidence about what the thermal blob is, and
         # evidence that arrives after the verdict is not evidence.
-        recognitions = (self.recogniser.update(optical)
-                        if optical is not None else [])
+        recognitions = []
+        if optical is not None:
+            recognitions = list(self.recogniser.update(optical))
+            if self.recogniser2 is not None:
+                recognitions += self.recogniser2.update(optical)
+
+        stage["recognise"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
 
         for det in detections:
             tr = tracks.get(det.track_id)
@@ -501,7 +530,17 @@ class Pipeline:
                 named = best_overlap(recognitions,
                                      homography.map_box(self.H, det.box))
                 if named is not None and named.confidence >= OPTICAL_NAME_TRUST:
-                    if named.label in CAN_OVERRULE:
+                    if named.label in AIRCRAFT_NAMES:
+                        # A model trained on drones saying "drone" is the one
+                        # optical answer that is evidence FOR an aircraft
+                        # rather than against one. No COCO model can produce
+                        # this word, so seeing it means somebody installed a
+                        # model that has actually looked at quadcopters.
+                        det.label = "drone"
+                        det.confidence = max(det.confidence,
+                                             named.confidence)
+                        det.named_by_optical = True
+                    elif named.label in CAN_OVERRULE:
                         det.label = named.label
                         det.confidence = named.confidence
                         det.named_by_optical = True
@@ -547,6 +586,9 @@ class Pipeline:
             pairs, unmatched_optical = associate(detections, optical_dets,
                                                  self.H)
 
+        stage["optical"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
+
         self.frame_index += 1
         now = self.now()
 
@@ -574,6 +616,9 @@ class Pipeline:
             for det in detections:
                 self.site.note_hotspot(det.hotspot_c)
         self.dwell.update(tracks, now)
+
+        stage["site"] = time.monotonic() - t_stage
+        t_stage = time.monotonic()
 
         assessments = []
         evidence = {}
@@ -767,12 +812,18 @@ class Pipeline:
 
         assessments.sort(key=lambda a: a.threat, reverse=True)
 
+        stage["assess"] = time.monotonic() - t_stage
+        res.stage_ms = {k: round(v * 1000.0, 1) for k, v in stage.items()}
+
         res.detections = detections
         res.tracks = tracks
         res.mask = self.detector.last_mask
         res.optical_detections = optical_dets
         res.recognitions = recognitions
         res.recogniser_stats = self.recogniser.stats()
+        if self.recogniser2 is not None:
+            st2 = self.recogniser2.stats()
+            res.recogniser_stats = dict(res.recogniser_stats, second=st2)
         res.optical_evidence = evidence
         res.optical_roi = self.optical.roi
         res.cross = {
