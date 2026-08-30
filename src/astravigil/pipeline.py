@@ -38,7 +38,7 @@ from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
 from .detection.objects import (
-    AIRCRAFT_NAMES, AUTOFETCH, CAN_OVERRULE, DRONE_PATH,
+    AIRCRAFT_NAMES, AUTOFETCH, CAN_OVERRULE, DRONE_CONF, DRONE_PATH,
     ObjectRecogniser, best_overlap, find_second_model)
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
@@ -224,11 +224,12 @@ class Pipeline:
         second = find_second_model(self.recogniser.path) \
             if recogniser is None else None
         if second:
-            self.recogniser2 = ObjectRecogniser(path=second)
+            self.recogniser2 = ObjectRecogniser(path=second, conf=DRONE_CONF)
         elif recogniser is None and AUTOFETCH:
             # Nothing in the second slot. Go and get the one model that can
             # say "drone", rather than leaving it as a command to remember.
             self.recogniser2 = ObjectRecogniser(path=DRONE_PATH,
+                                                conf=DRONE_CONF,
                                                 autofetch=False)
             self.recogniser2.fetch_drone_model()
             # Half a cycle out of step, so the two never land on one frame.
@@ -546,7 +547,13 @@ class Pipeline:
             if recognitions and self.H is not None:
                 named = best_overlap(recognitions,
                                      homography.map_box(self.H, det.box))
-                if named is not None and named.confidence >= OPTICAL_NAME_TRUST:
+                # An aircraft name is held to the drone model's own bar,
+                # not to the one that guards against picking the wrong COCO
+                # class. There is no wrong class in a one-class model.
+                trust = (DRONE_CONF if named is not None
+                         and named.label in AIRCRAFT_NAMES
+                         else OPTICAL_NAME_TRUST)
+                if named is not None and named.confidence >= trust:
                     if named.label in AIRCRAFT_NAMES:
                         # A model trained on drones saying "drone" is the one
                         # optical answer that is evidence FOR an aircraft

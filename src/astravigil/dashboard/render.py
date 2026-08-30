@@ -257,7 +257,13 @@ def _objects_note(result):
         who += (f" + {second.get('model')}" if second.get("available")
                 else f" (+{second.get('model')}: "
                      f"{second.get('error') or 'failed'})")
-    return f"  {n} named by {who} ({st.get('last_ms', 0):.0f} ms)"
+    # Split by model, because "the drone model is loaded" and "the drone
+    # model is finding something" are different facts and only one of them
+    # was ever on screen.
+    drone = sum(1 for r in (getattr(result, "recognitions", None) or ())
+                if r.label in ("drone", "uav", "quadcopter"))
+    tail = f", {drone} DRONE" if drone else ""
+    return f"  {n} named by {who}{tail} ({st.get('last_ms', 0):.0f} ms)"
 
 
 def _cues(result):

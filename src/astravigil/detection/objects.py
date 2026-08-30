@@ -120,6 +120,22 @@ DRONE_URL = ("https://huggingface.co/engdarwish/drone-detection-yolov5/"
              "resolve/main/best.onnx")
 DRONE_PATH = os.path.join(MODEL_DIR, DRONE_MODEL)
 
+# The drone model gets a much lower bar than the COCO one, and the reason is
+# structural rather than a fudge.
+#
+# A confidence threshold is protection against the model picking the wrong
+# CLASS. With eighty classes that is a real risk and 0.30 is the right guard.
+# With one class there is no wrong class to pick: the model either found a
+# drone-shaped thing or it did not, and the score is only how sure it is. The
+# cost of a false positive here is one extra box on a pane; the cost of a
+# false negative is missing the object the whole system is for.
+#
+# It also matters that this model was trained on drones IN FLIGHT, against
+# sky. A quadcopter sitting on a desk, side-on, at two metres is outside that
+# distribution and will score low even when it is plainly right - which is
+# what a rig with the model correctly loaded and naming nothing looks like.
+DRONE_CONF = env_float("ASTRAVIGIL_DRONE_CONF", 0.12)
+
 # Class names that are direct evidence of an aircraft rather than context.
 # A model trained on drones saying "drone" is worth something; a COCO model
 # cannot produce this word at all, which is the point.
