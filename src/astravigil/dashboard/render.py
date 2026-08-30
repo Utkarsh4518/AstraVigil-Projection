@@ -164,6 +164,16 @@ def _corners(img, x, y, w, h, col, arm=14, thick=3):
             cv2.line(img, (cx, cy), (cx, cy + dy * a), col, thick)
 
 
+def _grid_contours(img, mask_g, cell, col, thick):
+    """Outline a cell-resolution mask on a full-resolution image."""
+    if not mask_g.any():
+        return
+    contours, _ = cv2.findContours(mask_g, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    scaled = [(c * cell).astype(np.int32) for c in contours]
+    cv2.drawContours(img, scaled, -1, col, thick)
+
+
 def _chip(img, text, x, y, col, scale=0.42):
     """A filled label, the way an object detector draws one.
 
@@ -238,7 +248,16 @@ def _objects_note(result):
     if not st.get("available"):
         return f"  no object model: {st.get('error') or 'unavailable'}"
     n = len(getattr(result, "recognitions", None) or ())
-    return f"  {n} named ({st.get('last_ms', 0):.0f} ms)"
+    # Name the model, and the second one if there is one. "nothing was
+    # named" and "the model that names furniture is not the one loaded" look
+    # identical on a pane, and only one of them is a detection problem.
+    who = st.get("model") or "?"
+    second = st.get("second") or {}
+    if second:
+        who += (f" + {second.get('model')}" if second.get("available")
+                else f" (+{second.get('model')}: "
+                     f"{second.get('error') or 'failed'})")
+    return f"  {n} named by {who} ({st.get('last_ms', 0):.0f} ms)"
 
 
 def _cues(result):
@@ -707,19 +726,31 @@ def optical_site_view(result, site, scale=1):
                         / max(ACTIVITY_FULL - ACTIVITY_FLOOR, 1e-6), 0, 1)
         col = COL_TRAFFIC
 
-    over = img.copy()
-    lit = 0
-    for gy, gx in zip(*np.nonzero(field > 0.02)):
-        v = float(field[gy, gx])
-        x0, y0 = int(gx) * cell, int(gy) * cell
-        # A floor under the brightness so a cell that only just clears the
-        # threshold is still visible, and the gap between rectangles so the
-        # result reads as a grid of measurements rather than a stain.
-        shade = tuple(int(round(ch * (0.3 + 0.7 * v))) for ch in col)
-        cv2.rectangle(over, (x0 + 1, y0 + 1),
-                      (x0 + cell - 2, y0 + cell - 2), shade, -1)
-        lit += 1
-    img = cv2.addWeighted(img, 0.5, over, 0.5, 0)
+    # Built as an image and blended once, rather than as up to three hundred
+    # cv2.rectangle calls in a Python loop. That loop was the slowest thing
+    # in the drawing path on a Pi, and drawing runs on the capture thread -
+    # so it was being paid for in frames per second.
+    #
+    # A floor under the brightness so a cell that only just clears the
+    # threshold is still visible, and a one-pixel gap between cells so the
+    # result reads as a grid of measurements rather than a stain.
+    lit_mask = field > 0.02
+    lit = int(lit_mask.sum())
+    shade = np.where(lit_mask, 0.3 + 0.7 * np.clip(field, 0, 1), 0.0)
+    shade = cv2.resize(shade.astype(np.float32), (fw, fh),
+                       interpolation=cv2.INTER_NEAREST)
+    gaps = np.ones((fh, fw), np.float32)
+    gaps[::cell, :] = 0.0
+    gaps[:, ::cell] = 0.0
+    shade = (shade * gaps)[:, :, None]
+    # uint8 SIMD rather than float32 over three quarters of a megapixel,
+    # for the same reason the overlay blend is: this is drawn on the thread
+    # that captures frames.
+    w3 = cv2.merge([(shade[:, :, 0] * 128).astype(np.uint8)] * 3)
+    tint = np.empty_like(img)
+    tint[:, :] = col
+    img = cv2.add(cv2.multiply(img, cv2.bitwise_not(w3), scale=1.0 / 255),
+                  cv2.multiply(tint, w3, scale=1.0 / 255))
 
     if learning:
         # The holes. A cell with no history has no opinion, and an operator
@@ -733,21 +764,17 @@ def optical_site_view(result, site, scale=1):
     # Magenta outline: off baseline long enough to be an object. Outlined
     # rather than filled, so what is underneath stays readable - the operator
     # needs to see WHAT is sitting there.
-    settled = cv2.resize(
-        (site.persist >= site.persist_frames).astype(np.uint8), (fw, fh),
-        interpolation=cv2.INTER_NEAREST)
-    contours, _ = cv2.findContours(settled, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img, contours, -1, COL_SETTLED, 2)
+    # Contours are traced on the GRID and scaled up, not on a mask blown up
+    # to full resolution first. The outline is identical - these are cell
+    # boundaries either way - and it is found over three hundred pixels
+    # instead of three hundred thousand.
+    settled_g = (site.persist >= site.persist_frames).astype(np.uint8)
+    _grid_contours(img, settled_g, cell, COL_SETTLED, 2)
 
     # Amber outline: off baseline right now, but not for long enough to
     # count. Movement in progress rather than something that has arrived.
-    live = cv2.resize((site.z_map() > Z_ANOMALOUS).astype(np.uint8), (fw, fh),
-                      interpolation=cv2.INTER_NEAREST)
-    live = cv2.subtract(live, settled)
-    contours, _ = cv2.findContours(live, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img, contours, -1, COL_WATCH, 1)
+    live_g = cv2.subtract((site._z > Z_ANOMALOUS).astype(np.uint8), settled_g)
+    _grid_contours(img, live_g, cell, COL_WATCH, 1)
 
     img = _rot_image(img, OPTICAL_VIEW_ROT)
     if scale != 1:

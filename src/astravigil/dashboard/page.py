@@ -808,8 +808,11 @@ async function poll() {
     const rec = stats.recogniser || {};
     document.getElementById("objnote").textContent = !rec.available
       ? (rec.error ? " — object naming off: " + rec.error : "")
-      : ` — ${rec.model} · ${(stats.objects || []).length} named · ` +
-        `${fmt(rec.last_ms, 0)} ms every ${rec.every_n} frames`;
+      : ` — ${rec.model}${rec.second ? " + " + rec.second.model : ""}` +
+        ` · ${rec.labels} classes · ${(stats.objects || []).length} named` +
+        ` · ${fmt(rec.last_ms, 0)} ms every ${rec.every_n} frames` +
+        (stats.render_every_s ? ` · drawing every ${stats.render_every_s}s`
+                              : "");
 
     document.getElementById("histnote").textContent = stats.alert_log
       ? `closes 5 s after the object is last seen · logged to ${stats.alert_log}`

@@ -37,9 +37,26 @@ from flask import Flask, Response, jsonify, render_template_string, request
 
 from . import render
 from .page import PAGE
+from ..utils.env import env_float
 
 BOUNDARY = "frame"
 DEFAULT_VIEW_FPS = 6.0
+
+# The largest share of the capture loop that drawing is allowed to take.
+#
+# Rendering happens on this thread, between one frame and the next, so every
+# millisecond of it is a millisecond not spent capturing. Five panes on a Pi
+# is a warp, several site maps and five JPEG encodes; at a fixed six hertz
+# that came to most of the loop, and the delivered frame rate collapsed to
+# single figures while the machine was busy drawing pictures of frames it no
+# longer had time to capture.
+#
+# So the interval is not fixed. It is whatever keeps drawing under a quarter
+# of the loop, measured from what the last draw actually cost. A fast machine
+# renders at the full rate because a quarter of its loop is plenty; a slow
+# one renders less often and keeps capturing. Nothing needs tuning per rig,
+# which matters because the rig is not the machine this is written on.
+RENDER_SHARE = env_float("ASTRAVIGIL_RENDER_SHARE", 0.25)
 
 # Exit code the launcher script watches for to mean "start me again".
 RESTART_EXIT_CODE = 42
@@ -141,9 +158,12 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             time.sleep(0.25)
             continue
 
-        # --- draw, but only what someone is looking at and only every so often
+        # --- draw, but only what someone is looking at, only every so
+        # often, and never for more of the loop than RENDER_SHARE allows.
         wanted = state.wanted()
-        if wanted and view_period is not None and t0 - last_render >= view_period:
+        budget = max(view_period or 0.0,
+                     (render_ms / 1000.0) / max(RENDER_SHARE, 0.01))
+        if wanted and view_period is not None and t0 - last_render >= budget:
             t_render = time.monotonic()
             views = {}
             for name in wanted:
@@ -211,6 +231,12 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             "render_ms": round(render_ms, 2),
             "rendering": rendered,
             "view_fps": view_fps,
+            # What drawing is actually costing, and the interval that keeps
+            # it inside its share. Both shown, because "the console is slow"
+            # and "the console is drawing too often" look identical.
+            "render_every_s": round(max(view_period or 0.0,
+                                        (render_ms / 1000.0)
+                                        / max(RENDER_SHARE, 0.01)), 2),
         }
         # The scan grid is 768 numbers and only means anything while a
         # learning run is in progress, so it rides along then and not
