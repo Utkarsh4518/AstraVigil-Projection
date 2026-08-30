@@ -218,6 +218,12 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             stats["grid"] = pipeline.site.coverage()
             stats["grid_w"] = pipeline.site.gw
             stats["grid_h"] = pipeline.site.gh
+            if pipeline.optical_site is not None:
+                osite = pipeline.optical_site
+                stats["ogrid"] = [int(round(v * 100)) for v in
+                                  osite.coverage().flatten()]
+                stats["ogrid_w"] = osite.gw
+                stats["ogrid_h"] = osite.gh
 
         alerts = [a.as_dict() for a in result.alerts]
         for a in alerts:

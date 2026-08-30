@@ -160,8 +160,21 @@ _PAGE = r"""<!doctype html>
                object-fit:contain; display:block; background:#000; }
   figure.thermal img { aspect-ratio:__TH_ASPECT__; }
   figure.optical img { aspect-ratio:__OP_ASPECT__; }
-  figcaption { flex:1; padding:8px 12px; font-size:12px; color:var(--dim);
-               border-top:1px solid var(--line); }
+  /* One line, not a paragraph.
+     Five panes each carrying four sentences is more text than picture, and
+     an operator reads none of it after the first session. What they do need
+     at a glance is which colour means what; the prose is still there, on
+     hover, for the session where somebody is learning the console. */
+  figcaption { flex:1; padding:6px 10px; font-size:11px; color:var(--dim);
+               border-top:1px solid var(--line); cursor:help;
+               display:flex; align-items:center; flex-wrap:wrap; gap:0; }
+  figcaption b { color:var(--fg); font-weight:600; letter-spacing:.04em;
+                 text-transform:uppercase; font-size:10px; margin-right:6px; }
+  .k { display:inline-block; width:8px; height:8px; border-radius:2px;
+       margin:0 3px 0 9px; }
+  .k-alert { background:var(--alert); } .k-watch { background:var(--watch); }
+  .k-ok { background:var(--nominal); } .k-set { background:var(--settled); }
+  .k-opt { background:#3cebeb; } .k-name { background:#7bd88f; }
 
   .trail { background:var(--panel); border:1px solid var(--line);
            border-radius:8px; padding:6px 10px; margin-bottom:14px;
@@ -228,6 +241,9 @@ _PAGE = r"""<!doctype html>
   #scan { position:absolute; inset:0; width:100%; height:100%;
           pointer-events:none; display:none; }
   #scan.on { display:block; }
+  #oscan { position:absolute; inset:0; width:100%; height:100%;
+           pointer-events:none; display:none; }
+  #oscan.on { display:block; }
   .scanhud { position:absolute; left:0; right:0; bottom:34px; display:none;
              justify-content:center; pointer-events:none; }
   .scanhud.on { display:flex; }
@@ -316,48 +332,26 @@ _PAGE = r"""<!doctype html>
   <div class="views">
     <figure class="thermal">
       <img src="/stream/thermal" alt="thermal">
-      <figcaption>Thermal — warm movers against cold sky. Detection runs here.
-        Boxes are coloured by threat, not by class.</figcaption>
+      <figcaption title="Warm movers against cold sky. Detection runs on this frame and every other pane is derived from it. Boxes are coloured by threat rather than by class, because what an operator needs at a glance is which of the things on screen matters."><b>Thermal</b>detection<span class="k k-alert"></span>alert<span class="k k-watch"></span>watch<span class="k k-set"></span>settled</figcaption>
     </figure>
     <figure class="scanwrap thermal">
       <img src="/stream/site" alt="site">
       <canvas id="scan"></canvas>
       <div class="scanhud" id="scanhud"><div></div></div>
-      <figcaption>Site model — green is learned traffic, magenta is a patch
-        that has been off its learned temperature long enough to be an object.
-        Numbered boxes are what the model is being fed right now; the same
-        object number appears on every other pane and in the tracks table.</figcaption>
+      <figcaption title="What the thermal camera has learned about this place. Green is learned traffic - the brighter the cell, the more often something has moved through it. Magenta has been off its learned temperature long enough to be an object rather than a fly-past. Numbered boxes are what the model is being fed right now, and the same number appears on every other pane and in the tracks table."><b>Site</b>thermal<span class="k k-ok"></span>traffic<span class="k k-set"></span>settled</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/optical" alt="optical">
-      <figcaption>Optical — thermal detections mapped through the homography,
-        plus what this camera found on its own: yellow is something moving that
-        no thermal detection claimed, magenta is a patch its site model says has
-        been sitting there. Those two need no homography, so they are still drawn
-        while the rig is calibrating — but an object seen by only one sensor
-        cannot share a number with the other, because nothing yet knows they are
-        the same thing. Coloured labels are the object recogniser naming what is
-        in the room — those names are what answer thermal when it asks what
-        something is, and "it is a chair" beats "solidity 0.71".
-        <span id="objnote"></span></figcaption>
+      <figcaption title="Thermal detections mapped through the homography, plus what this camera found on its own: cyan is something moving that no thermal detection claimed, magenta is a patch its site model says has been sitting there. Those two need no homography, so they are still drawn while the rig is calibrating - but an object seen by only one sensor cannot share a number with the other, because nothing yet knows they are the same thing. Coloured labels are the object recogniser naming what is in the room, and those names are what answer thermal when it asks what something is."><b>Optical</b>mapped + own<span class="k k-opt"></span>optical-only<span class="k k-set"></span>settled<span class="k k-name"></span>named<span id="objnote"></span></figcaption>
     </figure>
-    <figure class="optical">
+    <figure class="scanwrap optical">
       <img src="/stream/optical_site" alt="optical site">
-      <figcaption>Optical site model — one square per cell of the model.
-        While it is learning, green is how much history a cell has and an
-        outlined square has none yet. Once learned, green is where change
-        normally happens — an empty map means nothing has moved through, which
-        is a real answer. Magenta has looked wrong long enough to be an
-        object and is numbered — this is the only optical channel that can see
-        something which has stopped moving, since the detector loses it within
-        seconds. Amber is off baseline right now.</figcaption>
+      <canvas id="oscan"></canvas>
+      <figcaption title="What the optical camera has learned about this place, one square per cell of the model. While it is learning, green is how much history a cell has and an outlined square has none yet. Once learned, green is where change normally happens - an empty map means nothing has moved through, which is a real answer rather than a failure. Magenta has looked wrong long enough to be an object; amber is off baseline now."><b>Site</b>optical<span class="k k-ok"></span>learned<span class="k k-set"></span>settled<span class="k k-watch"></span>live</figcaption>
     </figure>
     <figure class="optical">
       <img src="/stream/overlay" alt="overlay">
-      <figcaption>Overlay — only the warm part of the thermal frame, warped
-        into optical space. The white outline is its edge, and it should sit on
-        the object that is actually hot. If a numbered box misses its warm
-        patch, the frame matching has drifted.</figcaption>
+      <figcaption title="Only the warm part of the thermal frame, warped into optical space. The white outline is its edge and it should sit on the object that is actually hot; registration is a judgement about whether two edges coincide. If a numbered box misses its warm patch, the frame matching has drifted and every optical crop downstream is being taken from the wrong place."><b>Overlay</b>registration</figcaption>
     </figure>
   </div>
 
@@ -537,14 +531,24 @@ function alertCard(a) {
 let scanState = null;
 
 function drawScan(stats) {
-  const cv = document.getElementById("scan");
   const hud = document.getElementById("scanhud");
   const L = stats.learning || {};
-  if (!L.active || !stats.grid) {
-    cv.classList.remove("on"); hud.classList.remove("on");
-    return;
-  }
-  cv.classList.add("on"); hud.classList.add("on");
+  // Both cameras are learning the site, so both panes show it. Watching one
+  // fill while the other sits still is what makes an operator think only
+  // half the system is doing anything - and until now they were right.
+  drawGrid(document.getElementById("scan"), stats.grid,
+           stats.grid_w, stats.grid_h, L.active);
+  drawGrid(document.getElementById("oscan"), stats.ogrid,
+           stats.ogrid_w, stats.ogrid_h, L.active);
+  if (!L.active || !stats.grid) { hud.classList.remove("on"); return; }
+  hud.classList.add("on");
+  scanHud(L);
+}
+
+function drawGrid(cv, cov, gw, gh, active) {
+  if (!cv) return;
+  if (!active || !cov || !gw || !gh) { cv.classList.remove("on"); return; }
+  cv.classList.add("on");
 
   const img = cv.previousElementSibling;
   const W = img.clientWidth, H = img.clientHeight;
@@ -557,7 +561,6 @@ function drawScan(stats) {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
 
-  const gw = stats.grid_w, gh = stats.grid_h, cov = stats.grid;
   const cw = W / gw, ch = H / gh;
   const t = Date.now() / 1000;
 
@@ -588,12 +591,16 @@ function drawScan(stats) {
   g.fillStyle = grad;
   g.fillRect(0, sweep - 26, W, 52);
 
+}
+
+function scanHud(L) {
+  const hud = document.getElementById("scanhud");
   const pct = Math.round((L.progress || 0) * 100);
-  const cover = Math.round((L.coverage || 0) * 100);
   hud.firstElementChild.innerHTML =
     `LEARNING THIS SITE &nbsp; <b>${pct}%</b> &nbsp;·&nbsp; ` +
-    `coverage <b>${cover}%</b> &nbsp;·&nbsp; ` +
-    `<b>${Math.round(L.remaining_s || 0)}s</b> left`;
+    `thermal <b>${Math.round((L.coverage || 0) * 100)}%</b> &nbsp;·&nbsp; ` +
+    `optical <b>${Math.round((L.optical_coverage || 0) * 100)}%</b> ` +
+    `&nbsp;·&nbsp; <b>${Math.round(L.remaining_s || 0)}s</b> left`;
 }
 
 async function toggleLearn() {

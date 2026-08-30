@@ -44,6 +44,7 @@ import zlib
 import cv2
 import numpy as np
 
+from ..mount import OPTICAL_ROT, turn_box
 from ..utils.env import env_float, env_int
 
 # Where a model is looked for, and what is accepted. ONNX first: it is one
@@ -241,12 +242,20 @@ class ObjectRecogniser:
     """
 
     def __init__(self, path=None, conf=CONF_MIN, nms=NMS_IOU,
-                 size=INPUT_SIZE, every_n=EVERY_N, autofetch=None):
+                 size=INPUT_SIZE, every_n=EVERY_N, autofetch=None,
+                 rot=None):
         self.path = path if path is not None else find_model()
         self.conf = float(conf)
         self.nms = float(nms)
         self.size = int(size)
         self.every_n = max(1, int(every_n))
+        # Quarter turns to put the sensor frame the right way up before
+        # inference. Every COCO model is trained on upright photographs and
+        # falls apart on an inverted one - measured on a real room, four
+        # objects upright against one at a third of the confidence upside
+        # down. Boxes are turned back into sensor coordinates afterwards, so
+        # nothing downstream needs to know this happened.
+        self.rot = (OPTICAL_ROT if rot is None else rot) % 4
         self.net = None
         self.kind = None
         self.error = None
@@ -382,6 +391,7 @@ class ObjectRecogniser:
         return {"available": self.available,
                 "model": os.path.basename(self.path) if self.path else None,
                 "kind": self.kind,
+                "rot": self.rot,
                 "error": self.error,
                 "fetch_pct": (round(self.fetch_pct, 1)
                               if self.fetch_pct is not None else None),
@@ -428,13 +438,19 @@ class ObjectRecogniser:
                          name="astravigil-recognise").start()
 
     def detect(self, bgr):
-        """One pass. Returns a list of Recognition, highest confidence first."""
+        """One pass. Returns a list of Recognition, highest confidence first.
+
+        Boxes come back in SENSOR coordinates, the same frame everything else
+        in the pipeline works in, however the camera happens to be mounted.
+        """
         if not self.available or bgr is None:
             return []
+        upright = (np.ascontiguousarray(np.rot90(bgr, self.rot))
+                   if self.rot else bgr)
         t0 = time.monotonic()
         try:
-            out = (self._detect_onnx(bgr) if self.kind == "onnx"
-                   else self._detect_tf(bgr))
+            out = (self._detect_onnx(upright) if self.kind == "onnx"
+                   else self._detect_tf(upright))
         except Exception as exc:
             # A model that throws once will throw every time; say so and stop
             # rather than filling the log at frame rate.
@@ -443,6 +459,13 @@ class ObjectRecogniser:
             return []
         self.last_ms = 1000.0 * (time.monotonic() - t0)
         self.runs += 1
+        if self.rot:
+            # Undo the turn: the same rotation applied (4 - k) more times
+            # brings a point back, measured on the ROTATED frame's shape.
+            h, w = upright.shape[:2]
+            out = [Recognition(r.label, r.confidence,
+                               turn_box(r.box, w, h, 4 - self.rot))
+                   for r in out]
         out.sort(key=lambda r: r.confidence, reverse=True)
         return out
 

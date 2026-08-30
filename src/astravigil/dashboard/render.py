@@ -21,6 +21,7 @@ things on screen matters.
 import cv2
 import numpy as np
 
+from .. import mount
 from ..calibration import homography
 from ..detection.objects import best_overlap
 from ..detection.objects import colour_for as object_colour
@@ -28,30 +29,22 @@ from ..site_intelligence.optical_baseline import (
     ACTIVITY_FLOOR, ACTIVITY_FULL, Z_ANOMALOUS)
 from ..utils.env import env_int
 
-# How the thermal camera is mounted, in 90-degree anticlockwise steps applied
-# to the two thermal-space panes before they are shown.
+# How the cameras are mounted, from the one module that owns that fact.
 #
-# 3 on this rig: the sensor is on its side AND inverted, so a single
-# anticlockwise quarter turn left the scene upside down. Three of them - a
-# quarter turn clockwise - is what puts it the right way up. Measured on the
-# hardware, not derived: which way a camera ends up facing on a bracket is not
-# something the code can know.
+# Applied here to the panes, so an operator sees the room the right way up.
+# Detection, tracking, the site models and the homography all keep working in
+# the sensors' own coordinates, which is what keeps a site baseline learned
+# before the mount was described still valid, and what keeps
+# calibrate_homography.py - which fits H in sensor space - agreeing with the
+# overlay. Only the pixels an operator looks at are turned, along with the
+# boxes drawn on them.
 #
-# This is a VIEW setting, not a pipeline one. Detection, tracking, the site
-# model and the homography all keep working in the sensor's own coordinates,
-# which is what keeps a site baseline learned before the mount was described
-# still valid, and what keeps calibrate_homography.py - which fits H in sensor
-# space - agreeing with the overlay. Only the pixels an operator looks at are
-# turned, along with the boxes drawn on them.
-THERMAL_VIEW_ROT = env_int("ASTRAVIGIL_THERMAL_ROT", 3) % 4
-
-# The same idea for the two optical-space panes. 2 on this rig: the Pi camera
-# is mounted inverted, so the scene needs a half turn to come up the right way.
-#
-# Also a VIEW setting. The homography is fitted in the optical camera's own
-# coordinates and detections are mapped into them, so nothing upstream of the
-# draw call knows or cares which way up the pane is shown.
-OPTICAL_VIEW_ROT = env_int("ASTRAVIGIL_OPTICAL_ROT", 2) % 4
+# The object recogniser turns its input by the same amount for a different
+# reason - a detector trained on upright photographs cannot read an inverted
+# room - which is exactly why the number now lives somewhere both of them can
+# import it instead of being a dashboard constant.
+THERMAL_VIEW_ROT = mount.THERMAL_ROT
+OPTICAL_VIEW_ROT = mount.OPTICAL_ROT
 
 # Whether nominal detections get a box drawn on them.
 #

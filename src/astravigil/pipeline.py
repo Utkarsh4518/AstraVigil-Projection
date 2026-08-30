@@ -249,6 +249,13 @@ class Pipeline:
             self.site.reset()
             self.detector.reset()
             self.optical.reset()
+            # The optical baseline was left out of this, so "learn this site"
+            # rebuilt half the site. The button says the site, both cameras
+            # watch it, and an operator standing in front of a console
+            # watching one pane fill has no way to guess the other one is not
+            # being rebuilt at all.
+            if self.optical_site is not None:
+                self.optical_site.reset()
         self._session = {"target_s": float(seconds), "started": self.now(),
                          "done": False}
         return self.learning_status()
@@ -267,8 +274,15 @@ class Pipeline:
     def learning_status(self):
         s = self.site.stats()
         cov = float(np.clip(self.site.ref_n / MIN_LEARNED_FRAMES, 0, 1).mean())
+        # The optical half, reported separately. They fill at different rates
+        # - the optical model runs at a fraction of the frame rate and has
+        # six times the pixels - and averaging them into one number would
+        # hide whichever is behind.
+        ocov = (float(self.optical_site.coverage().mean())
+                if self.optical_site is not None else 0.0)
         out = {"active": self._session is not None,
                "coverage": round(cov, 3),
+               "optical_coverage": round(ocov, 3),
                "scene_maturity": s["scene_maturity"],
                "activity_maturity": s["activity_maturity"],
                "frames": s["frames"]}
@@ -282,7 +296,10 @@ class Pipeline:
             # let the bar reach 100% while a third of the frame had never been
             # modelled - which is precisely the situation an operator needs to
             # be told about rather than reassured through.
-            out["progress"] = round(min(elapsed / max(target, 1e-6), cov), 3)
+            # The slowest of the three, so the bar cannot reach 100% while
+            # either camera still has unmodelled frame left.
+            out["progress"] = round(
+                min(elapsed / max(target, 1e-6), cov, ocov or cov), 3)
             out["done"] = elapsed >= target
         return out
 
