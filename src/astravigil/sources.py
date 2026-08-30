@@ -117,6 +117,38 @@ class ReplaySource(Source):
 
 
 # ------------------------------------------------------------------- hardware
+# Slowest the optical camera is allowed to run.
+#
+# capture_array() BLOCKS until the sensor produces a frame, and the sensor
+# decides how long that takes: with auto-exposure in a dim room the exposure
+# stretches to fill the available frame time, the frame duration goes with
+# it, and a camera that runs at thirty frames a second in daylight settles to
+# five indoors. Because the call blocks, that becomes the rate of the whole
+# capture loop - thermal frames, detection, site models and all - and the
+# console reads five frames a second while every stage in it is measured in
+# single-digit milliseconds.
+#
+# Capping the frame duration costs image brightness and buys back the frame
+# rate, which is the right way round for a sensor whose job is noticing that
+# something moved. Raise it if the optical picture is too dark to use.
+OPTICAL_MIN_FPS = env_float("ASTRAVIGIL_OPTICAL_MIN_FPS", 15.0)
+
+
+def _limit_optical_rate(picam):
+    """Stop auto-exposure pacing the whole pipeline. Best effort."""
+    if OPTICAL_MIN_FPS <= 0:
+        return
+    slowest = int(1e6 / OPTICAL_MIN_FPS)        # microseconds per frame
+    try:
+        picam.set_controls({"FrameDurationLimits": (int(1e6 / 60), slowest)})
+        print(f"optical: frame duration capped at {slowest} us "
+              f"({OPTICAL_MIN_FPS:.0f} fps floor)")
+    except Exception as exc:
+        # Older picamera2, or a sensor that will not take the control. Not
+        # fatal - it only means the frame rate is back in the sensor's hands.
+        print(f"optical: could not cap frame duration ({exc})")
+
+
 class HardwareSource(Source):
     """Real HIKMICRO over USB plus a real optical camera. Linux only."""
 
@@ -167,16 +199,25 @@ class HardwareSource(Source):
                 self.picam.configure(self.picam.create_preview_configuration(
                     main={"size": (640, 480), "format": "RGB888"}))
                 self.picam.start()
+                _limit_optical_rate(self.picam)
             except Exception:
                 self.picam = None
         if self.picam is None:
             self.cap = cv2.VideoCapture(optical_index)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            # Same problem on a V4L2 webcam: read() blocks, and a dim room
+            # slows the sensor down until it is pacing the pipeline.
+            if OPTICAL_MIN_FPS > 0:
+                self.cap.set(cv2.CAP_PROP_FPS, OPTICAL_MIN_FPS)
 
         self._last_raw = None
 
     def frames(self):
+        # Thermal is non-blocking by design - latest() returns whatever the
+        # reader thread last managed, and the previous frame if it managed
+        # nothing - so a camera dropping frames costs freshness rather than
+        # frame rate. The optical read below is the one that blocks.
         raw, _ = self.stream.latest()
         if raw is None:
             raw = self._last_raw

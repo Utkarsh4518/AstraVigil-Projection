@@ -93,7 +93,14 @@ DEFAULT_MODEL = SIZES[os.environ.get("ASTRAVIGIL_OBJECT_SIZE", "s")][0]
 # keep using it after fetching a better one - a silent downgrade at the worst
 # possible moment, right after somebody went and got the bigger model
 # specifically because the smaller one was not working.
-MODEL_PREFERENCE = ("yolov5m.onnx", "yolov5s.onnx", "yolov5n.onnx")
+# Best first, where "best" means best ON THE TARGET, not most accurate.
+#
+# `m` used to lead and it is the wrong choice for a Pi 4 by a wide margin:
+# measured on the rig, 5299 ms per pass against 1273 for `s`. Four times the
+# time for a marginal gain in what it names, on a machine that is also trying
+# to keep a camera at frame rate. `s` leads now; `m` is still used if it is
+# the only one present, and ASTRAVIGIL_OBJECT_MODEL forces either.
+MODEL_PREFERENCE = ("yolov5s.onnx", "yolov5m.onnx", "yolov5n.onnx")
 
 # A second model, run alternately with the first.
 #
@@ -326,6 +333,26 @@ def _load_labels(model_path):
             except OSError:
                 pass
     return COCO
+
+
+def find_second_model(primary=None):
+    """The other model to run on alternate passes, or None.
+
+    A drone model in the model directory is picked up on sight. It used to
+    need an environment variable pointing at it, which is one more step
+    between fetching the thing and it working - and a step that, got wrong,
+    produces a rig naming a quadcopter "dog" with no indication that the
+    model which knows the word "drone" was never loaded. Installing it is
+    now the whole of installing it.
+    """
+    if MODEL2_PATH:
+        return MODEL2_PATH if os.path.exists(MODEL2_PATH) else None
+    path = os.path.join(MODEL_DIR, DRONE_MODEL)
+    if not os.path.exists(path):
+        return None
+    if primary and os.path.abspath(path) == os.path.abspath(primary):
+        return None            # it is already the primary; do not run twice
+    return path
 
 
 def find_model():

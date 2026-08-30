@@ -86,7 +86,30 @@ MIN_BOX_EXTENT = env_float("ASTRAVIGIL_OPTICAL_MIN_EXTENT", 0.14)
 NOISE_SIGMA = env_float("ASTRAVIGIL_OPTICAL_NOISE_SIGMA", 6.0)
 BACKGROUND_ALPHA = 0.02
 WARMUP_FRAMES = 20
-MERGE_GAP_PX = 8.0
+# Fragments closer than this are one object.
+#
+# This constant has been sitting here unused since the file was written, and
+# its absence is what an operator sees as "when a person passes, it detects
+# other things too". Background subtraction on a person does not return a
+# person: it returns a head, an arm, a leg and a shadow, as four disconnected
+# blobs, because the middle of a plain shirt differs from the plain wall
+# behind it by less than the threshold. Each fragment then gets its own box,
+# its own number and its own contact.
+#
+# Merging is done on the BOXES, after contours, and not by closing the mask.
+# Closing wide enough to bridge a person's limbs - twenty or thirty pixels -
+# smears every shape in the frame and inflates every box; the gaps that need
+# bridging are between parts of one object, and that is a question about
+# objects rather than about pixels.
+#
+# And the threshold is relative to size, because that is what actually
+# distinguishes the two cases. Parts of one object are close compared to how
+# big the object is: a person two hundred pixels tall has limbs a fair way
+# apart, while two separate objects twenty pixels across are separate at a
+# fraction of that distance. A fixed pixel gap has to choose which of those
+# to get wrong.
+MERGE_GAP_PX = 8.0          # floor, for objects too small for the fraction
+MERGE_GAP_FRAC = env_float("ASTRAVIGIL_OPTICAL_MERGE_FRAC", 0.35)
 
 
 class OpticalDetection:
@@ -121,6 +144,79 @@ class OpticalDetection:
                 "contrast": round(float(self.contrast), 1),
                 "darker": bool(self.darker),
                 "matched_thermal": self.thermal_match}
+
+
+def _box_gap(a, b):
+    """Pixels between two boxes; 0 if they touch or overlap."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    dx = max(0, max(ax, bx) - min(ax + aw, bx + bw))
+    dy = max(0, max(ay, by) - min(ay + ah, by + bh))
+    return max(dx, dy)
+
+
+def _merge_fragments(dets, frame_shape):
+    """Join detections that are parts of one object.
+
+    Background subtraction does not return a person; it returns a head, an
+    arm, a leg and a shadow, because the middle of a plain shirt differs from
+    the plain wall behind it by less than the threshold. Each fragment
+    otherwise gets its own box, its own number and its own contact - which is
+    what somebody sees as "when a person passes, it detects other things too".
+    """
+    if len(dets) < 2:
+        return dets
+    boxes = [list(d.box) for d in dets]
+    groups = [[i] for i in range(len(dets))]
+    merged = True
+    while merged and len(groups) > 1:
+        merged = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                a, b = boxes[i], boxes[j]
+                # The LARGER of the two, because the object is at least as
+                # big as its biggest part: a head fifteen pixels above a
+                # torso is part of the person, and judging that gap against
+                # the head alone gets it wrong in the one direction that
+                # matters. The union still has to survive the shape test, so
+                # this cannot run away across a frame.
+                span = max(a[2], a[3], b[2], b[3])
+                limit = max(MERGE_GAP_PX, MERGE_GAP_FRAC * span)
+                if _box_gap(a, b) > limit:
+                    continue
+                x0 = min(a[0], b[0])
+                y0 = min(a[1], b[1])
+                x1 = max(a[0] + a[2], b[0] + b[2])
+                y1 = max(a[1] + a[3], b[1] + b[3])
+                if not OpticalDetector._plausible(
+                        sum(dets[k].area for k in groups[i] + groups[j]),
+                        x1 - x0, y1 - y0, frame_shape):
+                    continue        # the union would not be an object either
+                boxes[i] = [x0, y0, x1 - x0, y1 - y0]
+                groups[i] += groups[j]
+                del groups[j], boxes[j]
+                merged = True
+                break
+            if merged:
+                break
+
+    out = []
+    for box, members in zip(boxes, groups):
+        if len(members) == 1:
+            out.append(dets[members[0]])
+            continue
+        # The largest fragment carries the measurements - it is the one with
+        # the most pixels behind its contrast and shape numbers - and takes
+        # the union box, which is the extent of the whole object.
+        lead = max(members, key=lambda k: dets[k].area)
+        d = dets[lead]
+        d.box = tuple(int(v) for v in box)
+        d.area = float(sum(dets[k].area for k in members))
+        d.centroid = (box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+        d.aspect = float(box[2]) / max(box[3], 1)
+        d.extent = d.area / max(float(box[2] * box[3]), 1.0)
+        out.append(d)
+    return out
 
 
 class OpticalDetector:
@@ -210,7 +306,8 @@ class OpticalDetector:
                                        NOISE_SIGMA * self.noise)
         mask = (diff > self.effective_threshold).astype(np.uint8) * 255
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                np.ones((5, 5), np.uint8))
         self.last_mask = mask
 
         # Same discipline as the thermal side: do not learn where something
@@ -277,5 +374,6 @@ class OpticalDetector:
                 contrast=float(diff[pix].mean()),
                 darker=bool(signed[pix].mean() < 0),
             ))
+        out = _merge_fragments(out, mask.shape)
         out.sort(key=lambda d: d.area, reverse=True)
         return out

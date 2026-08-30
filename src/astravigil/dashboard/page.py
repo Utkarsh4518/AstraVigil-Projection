@@ -310,6 +310,7 @@ _PAGE = r"""<!doctype html>
     <span class="stat"><span class="dot" id="health"></span><span id="status">starting</span></span>
     <span class="stat"><span class="tag">fps</span> <b id="fps">—</b></span>
     <span class="stat" id="procstat"><span class="tag">detect</span> <b id="proc">—</b> ms</span>
+    <span class="stat" id="capstat"><span class="tag">capture</span> <b id="cap">—</b> ms</span>
     <span class="stat"><span class="tag">draw</span> <b id="draw">—</b> ms</span>
     <span class="stat"><span class="tag">headroom</span> <b id="head">—</b></span>
     <span class="stat"><span class="tag">tracks</span> <b id="tracks">—</b></span>
@@ -675,6 +676,21 @@ async function poll() {
     document.getElementById("proc").textContent = fmt(stats.proc_ms, 2);
     // The breakdown on hover. A frame rate complaint needs to be answerable
     // without guessing which stage is the expensive one.
+    // Capture beside detect, because it is the stage that can dominate
+    // without any of the others moving: both cameras are read there, and one
+    // of them blocks until its sensor is ready.
+    document.getElementById("cap").textContent = fmt(stats.capture_ms, 1);
+    const th = stats.thermal;
+    document.getElementById("capstat").title = th
+      ? `thermal frames: ${th.frames} good, ${th.short} short, ${th.torn} torn`
+        + `, ${th.mismatched} wrong size (${th.good_pct}% usable)`
+        + `
+last frame ${th.bytes} bytes`
+        + `
+if capture is the big number, one of the two cameras is pacing `
+        + `the loop`
+      : "capture: reading both cameras";
+
     const sm = stats.stage_ms || {};
     document.getElementById("procstat").title = Object.keys(sm).length
       ? "per frame: " + Object.entries(sm)

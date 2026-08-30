@@ -38,8 +38,8 @@ from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
 from .detection.objects import (
-    AIRCRAFT_NAMES, CAN_OVERRULE, MODEL2_PATH, ObjectRecogniser,
-    best_overlap)
+    AIRCRAFT_NAMES, CAN_OVERRULE, ObjectRecogniser, best_overlap,
+    find_second_model)
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -212,8 +212,10 @@ class Pipeline:
         # per pass either way, and the twelve-second hold keeps both sets of
         # names on screen between their turns.
         self.recogniser2 = None
-        if MODEL2_PATH and recogniser is None:
-            self.recogniser2 = ObjectRecogniser(path=MODEL2_PATH)
+        second = find_second_model(self.recogniser.path) \
+            if recogniser is None else None
+        if second:
+            self.recogniser2 = ObjectRecogniser(path=second)
             # Half a cycle out of step, so the two never land on one frame.
             self.recogniser2._tick = self.recogniser2.every_n // 2
         self.optical_contacts = OpticalContactLog()

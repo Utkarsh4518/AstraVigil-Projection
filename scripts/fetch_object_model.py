@@ -167,10 +167,11 @@ def main():
             fh.write("\n".join(DRONE_CLASSES) + "\n")
         print(f"wrote {names}: {', '.join(DRONE_CLASSES)}")
         print()
-        print("To run it ALONGSIDE the COCO model, set this and restart:")
-        print(f"    ASTRAVIGIL_OBJECT_MODEL2={dest}")
-        print("They take alternate passes, so this costs no extra time per "
+        print("Nothing else to set. It is picked up on sight and runs on "
+              "alternate")
+        print("passes with the COCO model, so it costs no extra time per "
               "pass.")
+        print("Restart the dashboard and the caption will name both.")
         return 0
 
     os.makedirs(args.dest, exist_ok=True)

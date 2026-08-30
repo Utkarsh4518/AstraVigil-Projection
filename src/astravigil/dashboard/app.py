@@ -131,6 +131,27 @@ class DashboardState:
                     list(self.alerts), dict(self.stats))
 
 
+def _thermal_health(pipeline):
+    """What the thermal driver is managing, if there is a real one.
+
+    A camera delivering frames the driver refuses looks exactly like a
+    camera delivering nothing, and both look like a slow pipeline from the
+    outside. These four counters tell them apart.
+    """
+    stats = getattr(getattr(pipeline.source, "stream", None), "stats", None)
+    if stats is None:
+        return None
+    total = (stats.frames + stats.short_frames + stats.torn_frames
+             + stats.error_payloads + stats.mismatched_frames)
+    return {"frames": stats.frames,
+            "short": stats.short_frames,
+            "torn": stats.torn_frames,
+            "errors": stats.error_payloads,
+            "mismatched": stats.mismatched_frames,
+            "bytes": stats.last_frame_bytes,
+            "good_pct": round(100.0 * stats.frames / total, 1) if total else None}
+
+
 def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
     period = 1.0 / target_fps
     view_period = 1.0 / view_fps if view_fps > 0 else None
@@ -202,6 +223,10 @@ def capture_loop(pipeline, state, target_fps=25.0, view_fps=DEFAULT_VIEW_FPS):
             "fps": round(1.0 / mean_tick, 1) if mean_tick > 0 else 0.0,
             "proc_ms": round(result.proc_ms, 2),
             "stage_ms": result.stage_ms,
+            # Capture is the one stage that can dominate without any of the
+            # processing stages moving at all: both cameras are read here,
+            # and one of them blocks until its sensor is ready.
+            "thermal": _thermal_health(pipeline),
             "capture_ms": round(result.capture_ms, 1),
             # Headroom on the PROCESSING stage only. Capture is excluded
             # because in simulation it renders a whole world and would
