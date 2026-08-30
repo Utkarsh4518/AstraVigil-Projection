@@ -44,10 +44,19 @@ class Detection:
 
     __slots__ = ("box", "centroid", "area", "peak_c", "mean_c", "contrast_c",
                  "aspect", "extent", "solidity", "track_id", "label",
-                 "confidence", "flap_score", "parts")
+                 "confidence", "flap_score", "parts",
+                 # Why the local rules say this cannot be an aircraft, and
+                 # whether the optical camera named it. Both are carried on
+                 # the detection so the console and the remote model can be
+                 # told WHY a label is what it is, rather than only what it
+                 # is - a bare "unknown" is the same silence that made the
+                 # previous confident answer untrustworthy.
+                 "not_airborne", "named_by_optical")
 
     def __init__(self, box, centroid, area, peak_c, mean_c, contrast_c,
                  aspect, extent, solidity, parts=1):
+        self.not_airborne = None
+        self.named_by_optical = False
         self.box = box                 # (x, y, w, h)
         self.centroid = centroid       # (cx, cy) float
         self.area = area

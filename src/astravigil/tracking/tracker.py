@@ -63,6 +63,21 @@ class Track:
         return math.dist(p[0], p[-1]) / path
 
     @property
+    def displacement_px(self):
+        """Straight-line distance between the oldest and newest position.
+
+        NET displacement, not path length. Path length is useless for this:
+        a stationary blob whose centroid jitters by a pixel a frame
+        accumulates forty pixels of "path" over the history and looks like
+        something that travelled. The distance between where it started and
+        where it is now does not accumulate jitter.
+        """
+        p = list(self.positions)
+        if len(p) < 2:
+            return 0.0
+        return math.dist(p[0], p[-1])
+
+    @property
     def flap_score(self):
         """Normalised oscillation of blob area - the wingbeat signal.
 

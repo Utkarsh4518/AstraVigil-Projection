@@ -52,6 +52,64 @@ STRAIGHT_DRONE = 0.90
 MIN_HITS = 8            # frames of history before committing to a label
 DECISION = 0.58         # below this margin, stay honest and say unknown
 
+# --- is this an aircraft at all?
+#
+# Everything above discriminates a drone FROM A BIRD, and that is all it does.
+# It has no null hypothesis, so anything that is not bird-like comes out the
+# other side as a drone - and a radiator, a laptop vent or somebody's hands
+# are about as un-birdlike as an object can be. Rigid silhouette scores the
+# full wingbeat weight for "drone", a hot core above its own mean scores the
+# hotspot weight for "drone", a compact blob scores the shape weight, and the
+# console announces a 0.9-confidence quadcopter sitting motionless on a desk.
+#
+# That was defensible while the only things in frame were airborne: the
+# detector was built for warm movers against cold sky, where everything it
+# can see is already flying. It is wrong the moment the camera points at a
+# room, and it is wrong in the most damaging direction, because a false
+# "drone" at high confidence is exactly the alarm nobody can afford to
+# ignore and exactly the one they will learn to.
+#
+# So two gates, both asking a question the discriminator never asks.
+
+# Net displacement over the track history before "drone" is on the table.
+#
+# A drone that has flown into a perimeter camera's view has moved; a hot
+# object in a room has not. Eight pixels over ~1.6 s is a very low bar - far
+# below anything under command - and a stationary object clears none of it,
+# because this is net displacement and jitter does not accumulate into it.
+#
+# A genuinely hovering airframe is downgraded to "unknown" by this, and that
+# is the intended trade. It does NOT go quiet: threat is a noisy-OR over
+# identity and site novelty, so something hovering where the site model has
+# never seen traffic still raises on the site channel. What is lost is a
+# confident NAME, which was never earned by a stationary blob anyway.
+MIN_DISPLACEMENT_PX = 8.0
+
+# Blob area above which this is not an airframe at any useful range.
+#
+# A 0.25 m quad spans about 8 px at 18 m and 2 px at 73 m on this sensor, so
+# a target of even a few hundred pixels is either very close or very large.
+# Two thousand is about four percent of a 256x192 frame: a person at indoor
+# range clears it comfortably, an aircraft at watch range does not come near.
+MAX_AIRFRAME_AREA_PX = 2000.0
+
+
+def not_airborne(detection, track):
+    """Why this cannot be an aircraft, or None if it might be.
+
+    Returned as a sentence rather than a boolean so the reason can be put in
+    front of an operator. "unknown" with no explanation is the same silence
+    that made the previous answer untrustworthy.
+    """
+    if track is not None and track.hits >= MIN_HITS \
+            and track.displacement_px < MIN_DISPLACEMENT_PX:
+        return (f"has not moved - {track.displacement_px:.1f} px of net "
+                f"travel over its whole history")
+    if detection.area > MAX_AIRFRAME_AREA_PX:
+        return (f"far too large for an airframe at watch range "
+                f"({int(detection.area)} px)")
+    return None
+
 
 def classify(detection, track):
     """Return (label, confidence in 0..1).
@@ -61,6 +119,11 @@ def classify(detection, track):
     wrong answer in front of judges.
     """
     if track is None or track.hits < MIN_HITS:
+        return "unknown", 0.0
+    if not_airborne(detection, track):
+        # Not "bird", which would be a different confident wrong answer.
+        # There is no evidence here about what it is, only about what it is
+        # not, and the honest label for that is unknown.
         return "unknown", 0.0
 
     drone = bird = 0.0

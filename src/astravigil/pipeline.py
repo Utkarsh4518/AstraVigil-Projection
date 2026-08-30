@@ -34,10 +34,10 @@ import numpy as np
 
 from .alerting import AlertManager
 from .calibration import homography
-from .classification.rules import classify
+from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
-from .detection.objects import ObjectRecogniser, best_overlap
+from .detection.objects import AIRBORNE, ObjectRecogniser, best_overlap
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -64,6 +64,22 @@ CROSS_LOG_MAX = 14
 # the time dwell alone has, minutes have passed. Cold, still, and unnameable
 # is itself the signature, so it gets its own trigger.
 ESCALATE_COLD_DWELL_S = 20.0
+
+# Confidence below which the local classifier counts as unsure, and the
+# threat above which being unsure is worth an API call.
+#
+# Threat alone is the wrong trigger for this. It fires when the local
+# evidence already agrees on something alarming, which is the case that needs
+# a second opinion LEAST - the answer is already known and acted on. The case
+# that needs one is the opposite: something is clearly there, clearly not
+# nothing, and nothing on this machine can name it. That is what a bigger
+# model is for.
+UNSURE_CONF = 0.65
+ESCALATE_DOUBT_AT = 0.35
+
+# How confident the optical recogniser must be before its name overrules the
+# thermal classifier's.
+OPTICAL_NAME_TRUST = 0.50
 
 
 class Result:
@@ -351,9 +367,34 @@ class Pipeline:
         detections = self.detector.update(res.thermal_c)
         tracks = self.tracker.update(detections)
 
+        # Naming runs on the optical frame at its own reduced rate, and runs
+        # HERE - before classification, not after - because what the optical
+        # camera can see is evidence about what the thermal blob is, and
+        # evidence that arrives after the verdict is not evidence.
+        recognitions = (self.recogniser.update(optical)
+                        if optical is not None else [])
+
         for det in detections:
             tr = tracks.get(det.track_id)
             det.label, det.confidence = classify(det, tr)
+            det.not_airborne = not_airborne(det, tr) if tr is not None else None
+
+            # The other camera gets a say in what this is. A thermal blob is
+            # a temperature and a silhouette; "laptop" is a fact about the
+            # object, and it beats every inference drawn from four pixels.
+            #
+            # Only downgrades. A recognition can say "this warm thing is a
+            # chair" and take a drone label away, and it can never award one -
+            # nothing in COCO is a quadcopter, so a model that has never seen
+            # one has no standing to confirm it is looking at one.
+            if recognitions and self.H is not None:
+                named = best_overlap(recognitions,
+                                     homography.map_box(self.H, det.box))
+                if (named is not None
+                        and named.confidence >= OPTICAL_NAME_TRUST
+                        and named.label not in AIRBORNE):
+                    det.label, det.confidence = named.label, named.confidence
+                    det.named_by_optical = True
             if tr is not None:
                 tr.label, tr.confidence = det.label, det.confidence
 
@@ -414,13 +455,6 @@ class Pipeline:
             if self._optical_tick % max(1, self.optical.every_n) == 0:
                 optical_z = self.optical_site.observe(optical, learn=self.learn)
 
-        # Naming runs on the optical frame at its own reduced rate. Placed
-        # before assessment so the names are available to answer with, not
-        # after, when they would be a frame stale and useless for the cue
-        # they exist to serve.
-        recognitions = self.recogniser.update(optical) if optical is not None \
-            else []
-
         self.site.observe(res.thermal_c, tracks,
                           exclude_ids=self._alerting, learn=self.learn)
         if self.learn:
@@ -473,6 +507,15 @@ class Pipeline:
                     when=now)
             a = assess_track(det, tr, novelty, dwell_s, optical_ev,
                              judgement=judgement)
+            # Why it is NOT being called an aircraft, in the reasons where an
+            # operator will read it. "unknown" with no explanation is the same
+            # silence that made the previous confident answer untrustworthy.
+            if det.not_airborne:
+                a.reasons = list(a.reasons) + [det.not_airborne]
+            elif det.named_by_optical:
+                a.reasons = list(a.reasons) + [
+                    f"optical camera recognises it as a {det.label} "
+                    f"({det.confidence:.2f})"]
             if optical_ev is not None:
                 named = None
                 if recognitions and self.H is not None:
@@ -665,7 +708,15 @@ class Pipeline:
         behaves identically when the network is gone.
         """
         esc = self.escalator
-        if not esc.enabled or assessment.threat < self.escalate_at:
+        if not esc.enabled:
+            return
+        # Two triggers. High threat, as before - and DOUBT, which is the case
+        # a remote model is actually good for: something is there, it is not
+        # nothing, and nothing local can name it.
+        unsure = (assessment.label in ("unknown", "")
+                  or assessment.confidence < UNSURE_CONF)
+        if assessment.threat < self.escalate_at and not (
+                unsure and assessment.threat >= ESCALATE_DOUBT_AT):
             return
         key = assessment.key
         if not esc.should_ask(key):
@@ -681,7 +732,15 @@ class Pipeline:
                 "At 1.70 mrad/px, a 0.25 m airframe spans ~8 px at 18 m and "
                 "~2 px at 73 m, so a small blob means distance, not a small "
                 "aircraft."),
+            "local_verdict": f"{assessment.label} at "
+                             f"{assessment.confidence:.2f} confidence",
         })
+        why = getattr(det, "not_airborne", None)
+        if why:
+            # Tell it what we already ruled out, so the reply is about the
+            # open question rather than about the one that is settled.
+            features["ruled_out"] = (
+                f"local rules say this cannot be an aircraft: {why}")
         esc.ask(key, features,
                 thermal_crop=self._thermal_crop(res, det),
                 optical_crop=self.crop_optical(det, margin=12))
