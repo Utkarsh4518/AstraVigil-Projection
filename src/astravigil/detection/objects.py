@@ -134,6 +134,17 @@ NMS_IOU = env_float("ASTRAVIGIL_OBJECT_NMS", 0.45)
 # frame would spend the whole budget re-deciding that the chair is a chair.
 EVERY_N = env_int("ASTRAVIGIL_OBJECT_EVERY_N", 25)
 
+# Seconds a name survives a pass that did not repeat it.
+#
+# A chair sitting still scored 0.35 one run and nothing the next, so it
+# appeared and vanished on a pane where nothing had moved. That is not the
+# model changing its mind about the room; it is a confidence sitting on a
+# threshold, sampled every couple of seconds. Furniture does not leave
+# between passes, so a name is held for a few of them and only forgotten if
+# it stops being reported for longer than a person would take to carry it
+# out of the room.
+HOLD_S = env_float("ASTRAVIGIL_OBJECT_HOLD_S", 12.0)
+
 # Contrast stretching before inference was tried here and MEASURED WORSE, so
 # there is none. It seemed obvious: a detector trained on daylight cannot see
 # a frame whose histogram sits in the bottom fifth of the range, and CLAHE
@@ -321,6 +332,9 @@ class ObjectRecogniser:
         self._busy = False
         self._lock = threading.Lock()
         self.stale_ms = 0.0
+        # label -> (Recognition, last time it was reported). Keyed by label
+        # and position so two chairs stay two chairs.
+        self._held = []
         if self.path:
             self._load()
             return
@@ -468,6 +482,7 @@ class ObjectRecogniser:
                 "last_ms": round(self.last_ms, 1),
                 "busy": bool(self._busy),
                 "objects": len(self._last),
+                "held": len(self._held),
                 "every_n": self.every_n}
 
     # -------------------------------------------------------------- detect
@@ -499,12 +514,38 @@ class ObjectRecogniser:
 
         def run():
             try:
-                self._last = self.detect(frame)
+                self._last = self._remember(self.detect(frame))
             finally:
                 self._busy = False
 
         threading.Thread(target=run, daemon=True,
                          name="astravigil-recognise").start()
+
+    def _remember(self, found, now=None):
+        """Merge this pass into the held set and drop what has gone quiet.
+
+        A name that repeats refreshes its entry and takes the newer box; one
+        that does not is kept until HOLD_S has passed. The result is what the
+        pane draws, so an object on the confidence threshold reads as present
+        rather than as flickering.
+        """
+        now = time.monotonic() if now is None else now
+        kept = []
+        for r, seen in self._held:
+            if now - seen <= HOLD_S:
+                kept.append([r, seen])
+        for f in found:
+            for entry in kept:
+                if entry[0].label == f.label and _overlaps(entry[0].box,
+                                                          f.box):
+                    entry[0], entry[1] = f, now
+                    break
+            else:
+                kept.append([f, now])
+        self._held = [(r, seen) for r, seen in kept]
+        out = [r for r, _ in self._held]
+        out.sort(key=lambda r: r.confidence, reverse=True)
+        return out
 
     def detect(self, bgr):
         """One pass. Returns a list of Recognition, highest confidence first.
@@ -615,6 +656,16 @@ class ObjectRecogniser:
             out.append(Recognition(COCO[int(ids[i])], conf[i],
                                    (x, y, bw_, bh_)))
         return out
+
+
+def _overlaps(a, b, min_frac=0.4):
+    """Do these two boxes describe the same thing in the same place?"""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    inter = ix * iy
+    return inter >= min_frac * min(aw * ah, bw * bh)
 
 
 def best_overlap(recognitions, box, min_iou=0.15):

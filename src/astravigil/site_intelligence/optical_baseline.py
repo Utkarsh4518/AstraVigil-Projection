@@ -125,6 +125,27 @@ MAX_DEV_SIGMA = 4.0
 # is a tenth of a 480x640 one.
 MAX_REGION_CELLS = 30
 
+# The smallest patch worth calling an object, and how much of its own
+# bounding box it has to fill.
+#
+# Without these, every edge in the scene becomes a settled object the moment
+# the baseline is a little stale - a camera nudged a millimetre, or a light
+# changed after learning, leaves thin off-baseline traces along every
+# boundary in the room. They pass the cell-count limit easily, because a
+# trace two cells wide and ten long is twenty cells, and they arrive by the
+# dozen. The extent test is what separates them: an object that has been put
+# down fills its own box, and an outline does not.
+MIN_REGION_CELLS = 3
+MIN_REGION_EXTENT = 0.45
+
+# Most settled patches to report at once.
+#
+# Past this, the honest reading is not "eleven objects have been placed in
+# the room" but "the baseline no longer matches what this camera sees" -
+# which is a different problem with a different fix, and the console should
+# say so rather than draw eleven boxes.
+MAX_REGIONS = 6
+
 
 class OpticalRegion:
     """A patch of the optical scene that has looked wrong long enough to be
@@ -183,10 +204,12 @@ class OpticalBaseline:
         self.activity = np.zeros(g, np.float32)
 
         self._z = np.zeros(g, np.float32)
+        self._last_cells = None
         # Last frame's settled patches, as (box, key). Identity for a patch
         # comes from overlapping one of these, not from where its centroid
         # happens to round to - see _region_key.
         self._prev_regions = []
+        self.regions_found = 0
         self.frames = 0
         self.created = time.time()
 
@@ -212,6 +235,7 @@ class OpticalBaseline:
             "settled_cells": int((self.persist >= self.persist_frames).sum()),
             "active_cells": int((self.activity >= ACTIVITY_FLOOR).sum()),
             "blind_cells": int((self.ref_n < MIN_LEARNED_FRAMES).sum()),
+            "regions_found": int(self.regions_found),
             "cells": int(self.gh * self.gw),
         }
 
@@ -265,6 +289,9 @@ class OpticalBaseline:
                           fps=self.fps)
 
         structure, tone = self._cells(bgr)
+        # Kept so accept() can adopt what the cell looks like RIGHT NOW as
+        # its new baseline, which is what the operator is pointing at.
+        self._last_cells = (structure, tone)
         self.frames += 1
 
         s_std = np.maximum(np.sqrt(self.struct_var), STRUCTURE_FLOOR)
@@ -380,11 +407,15 @@ class OpticalBaseline:
         out = []
         for i in range(1, n):
             cells = int(stats[i, cv2.CC_STAT_AREA])
-            if cells > MAX_REGION_CELLS:
-                continue                    # scenery-scale, not a target
-            m = labels == i
+            if not MIN_REGION_CELLS <= cells <= MAX_REGION_CELLS:
+                continue                    # noise, or scenery-scale
             gx, gy = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
             gw, gh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            if cells < MIN_REGION_EXTENT * gw * gh:
+                # An outline, not an object. A stale baseline traces every
+                # edge in the room and each trace passes the cell count.
+                continue
+            m = labels == i
             box = (int(gx * self.cell_px), int(gy * self.cell_px),
                    int(gw * self.cell_px), int(gh * self.cell_px))
             centroid = (float(cents[i][0] * self.cell_px),
@@ -396,6 +427,11 @@ class OpticalBaseline:
                 centroid=centroid,
                 key=self._region_key(box, centroid)))
         out.sort(key=lambda r: r.dwell_s, reverse=True)
+        # Longest-settled first, then capped. Past the cap this is a stale
+        # baseline rather than a room filling with objects, and the count is
+        # reported so an operator can tell those two apart.
+        self.regions_found = len(out)
+        out = out[:MAX_REGIONS]
         self._prev_regions = [(r.box, r.key) for r in out]
         return out
 
@@ -419,6 +455,37 @@ class OpticalBaseline:
                 return key
         return (f"optical-static:{int(centroid[1]) // 64}:"
                 f"{int(centroid[0]) // 64}")
+
+    def accept(self, box):
+        """An operator says this patch is normal here. Believe them.
+
+        Adopts the cells under the box as their own new baseline in one step,
+        rather than waiting out the adaptation window - which for a settled
+        object is deliberately slow, because the whole point of this model is
+        that a thing which arrives and stays does not get absorbed. An
+        operator saying "that is my chair" is the one piece of evidence that
+        should override that, and it should take effect immediately or they
+        will click it again.
+        """
+        x, y, w, h = box
+        gx0 = max(0, int(x) // self.cell_px)
+        gy0 = max(0, int(y) // self.cell_px)
+        gx1 = min(self.gw, int(x + w) // self.cell_px + 1)
+        gy1 = min(self.gh, int(y + h) // self.cell_px + 1)
+        if gx1 <= gx0 or gy1 <= gy0:
+            return 0
+        sl = (slice(gy0, gy1), slice(gx0, gx1))
+        if self._last_cells is None:
+            return 0
+        structure, tone = self._last_cells
+        self.struct_mean[sl] = structure[sl]
+        self.tone_mean[sl] = tone[sl]
+        # Variance is left alone: what it is normal for this cell to VARY by
+        # has not changed just because what it looks like has.
+        self.persist[sl] = 0
+        self._z[sl] = 0.0
+        self.ref_n[sl] = np.maximum(self.ref_n[sl], MIN_LEARNED_FRAMES)
+        return int((gy1 - gy0) * (gx1 - gx0))
 
     def z_map(self):
         """The z-scores at frame resolution, for drawing."""

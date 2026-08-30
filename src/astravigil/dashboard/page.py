@@ -214,6 +214,27 @@ _PAGE = r"""<!doctype html>
          font-variant-numeric:tabular-nums; line-height:17px; }
   .cue.none { color:var(--dim); border-style:dashed; }
 
+  /* Things that arrived and stayed. Not alerts - most of them are somebody's
+     bag - but each one is an open question, and the answer is a person
+     looking at it once. Dismissing teaches the baseline, so the same bag is
+     not asked about again tomorrow. */
+  .watch { background:var(--panel); border:1px solid var(--line);
+           border-radius:8px; margin-bottom:14px; overflow:hidden; }
+  .watch .w { display:grid; align-items:center; gap:10px;
+              grid-template-columns:34px 1fr 1.4fr 62px 74px;
+              padding:7px 10px; font-size:12px;
+              border-bottom:1px solid var(--line); }
+  .watch .w:last-child { border-bottom:0; }
+  .watch .w.lv-alert { background:#2a1414; }
+  .watch .w.lv-watch { background:#241d10; }
+  .watch .what b { font-weight:600; }
+  .watch .said { color:var(--dim); overflow:hidden;
+                 text-overflow:ellipsis; white-space:nowrap; }
+  .watch .age { text-align:right; color:var(--dim);
+                font-variant-numeric:tabular-nums; }
+  .watch .empty { padding:14px; color:var(--dim); text-align:center;
+                  font-size:12px; }
+
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
        color:var(--dim); margin:26px 0 8px; display:flex; gap:10px;
        align-items:center; }
@@ -353,6 +374,11 @@ _PAGE = r"""<!doctype html>
       <img src="/stream/overlay" alt="overlay">
       <figcaption title="Only the warm part of the thermal frame, warped into optical space. The white outline is its edge and it should sit on the object that is actually hot; registration is a judgement about whether two edges coincide. If a numbered box misses its warm patch, the frame matching has drifted and every optical crop downstream is being taken from the wrong place."><b>Overlay</b>registration</figcaption>
     </figure>
+  </div>
+
+  <h2>Watching <span class="tag" id="watchnote"></span></h2>
+  <div class="watch" id="watch">
+    <p class="empty">nothing has been left in view</p>
   </div>
 
   <h2>Closed <span class="tag" id="histnote"></span></h2>
@@ -710,6 +736,34 @@ async function poll() {
         stack.innerHTML = html;
       }
     }
+
+    // Everything that arrived and stayed. This is the settled channel's
+    // whole output in one place: what it is, what the other camera said
+    // about it, and a button that ends the question. Dismissing writes the
+    // object into the baseline, so it is not raised again.
+    const watch = document.getElementById("watch");
+    const wl = stats.watching || [];
+    const whtml = wl.length
+      ? wl.map(w => `<div class="w lv-${w.level}">
+           <span class="cue">${w.cue ?? "—"}</span>
+           <span class="what"><b>${esc(w.label)}</b>
+             <span class="said">${esc(w.reasons[0] || "")}</span></span>
+           <span class="said" title="${esc(w.thermal)}">${esc(w.thermal)}</span>
+           <span class="age">${Math.round(w.dwell_s)}s</span>
+           <button onclick="accept('${w.key}')"
+             title="This belongs here — fold it into the baseline and stop
+                    asking">normal</button>
+         </div>`).join("")
+      : '<p class="empty">nothing has been left in view</p>';
+    if (watch.dataset.sig !== whtml) {
+      watch.dataset.sig = whtml;
+      watch.innerHTML = whtml;
+    }
+    const orx = (stats.optical_site || {}).regions_found || 0;
+    document.getElementById("watchnote").textContent = wl.length
+      ? `settled objects · "normal" teaches the site and stops the question`
+      : (orx > 6 ? `${orx} patches off baseline — the site model is stale, `
+                 + `re-learn it` : "objects that arrived and stayed");
 
     // Where an alert goes when it disappears. It closes five seconds after
     // the object stops being seen, and every open and close is appended to

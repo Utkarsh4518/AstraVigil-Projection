@@ -79,6 +79,15 @@ ESCALATE_COLD_DWELL_S = 20.0
 # if something real is in a noisy frame it is not the smallest thing in it.
 MAX_OPTICAL_SHOWN = 8
 
+# How long something must have been sitting there before it is worth an
+# operator's attention, and how many to list.
+#
+# Six seconds is the same threshold the site models use to call a patch
+# settled rather than passing, so this list contains exactly what those
+# models are prepared to stand behind.
+WATCH_MIN_DWELL_S = 6.0
+WATCH_MAX = 12
+
 # Confidence below which the local classifier counts as unsure, and the
 # threat above which being unsure is worth an API call.
 #
@@ -100,7 +109,8 @@ class Result:
     __slots__ = ("thermal_raw", "thermal_c", "optical", "detections",
                  "tracks", "mask", "proc_ms", "capture_ms", "frame_index",
                  "healthy", "assessments", "alerts", "alert_history",
-                 "recognitions", "recogniser_stats", "static_anomalies",
+                 "recognitions", "recogniser_stats", "watching",
+                 "static_anomalies",
                  "site_stats", "optical_site_stats", "cross_log",
                  "cue_numbers", "optical_cues", "optical_regions", "novelty",
                  "optical_detections",
@@ -139,6 +149,11 @@ class Result:
         self.site_stats = {}
         self.novelty = None         # cell z-map upsampled to frame size
 
+        # Things that have arrived and stayed, with what is known about
+        # each. An operator's working list: everything here is either
+        # something that was put down, or something that should not have
+        # been, and the two are told apart by looking rather than by rule.
+        self.watching = []
         self.recognitions = []         # named objects in the optical frame
         self.recogniser_stats = {}
         self.optical_detections = []   # what the optical camera found alone
@@ -355,6 +370,38 @@ class Pipeline:
                     f"above surroundings")
         return (f"NOT warm - {ev.peak_c:.1f} C peak, only "
                 f"{ev.contrast_c:+.1f} C above surroundings")
+
+    def _watch_list(self, assessments, now):
+        """Everything that has arrived and not left, newest concern first.
+
+        Only the settled channels. A warm mover is a track and belongs in the
+        tracks table; this is the other kind of object entirely - the one
+        that is not moving, cannot be classified from motion, and is
+        therefore either furniture or the thing this system was built for.
+        Both look identical to every sensor on the rig, which is exactly why
+        it has to be a list a person can look down.
+        """
+        out = []
+        for a in assessments:
+            if a.kind not in ("static", "optical"):
+                continue
+            if a.dwell_s < WATCH_MIN_DWELL_S:
+                continue
+            out.append({
+                "key": a.key,
+                "cue": self.cues.number(a.key, now),
+                "label": a.label,
+                "kind": a.kind,
+                "dwell_s": round(a.dwell_s, 1),
+                "threat": round(a.threat, 3),
+                "level": a.level,
+                "sensors": a.sensors,
+                "thermal": self._thermal_answer(
+                    getattr(a, "thermal_check", None)),
+                "reasons": list(a.reasons)[:3],
+            })
+        out.sort(key=lambda w: (-w["threat"], -w["dwell_s"]))
+        return out[:WATCH_MAX]
 
     def _save_calibration(self, H):
         """Write the learned homography out, so the next run starts with it.
@@ -696,6 +743,7 @@ class Pipeline:
         res.optical_site_stats = (self.optical_site.stats()
                                   if self.optical_site is not None else None)
         res.cross_log = list(self.cross_log)
+        res.watching = self._watch_list(assessments, now)
         res.cue_numbers = self.cues.snapshot()
         res.optical_cues = optical_cues
         # Stationary correspondences, for an operator who has moved about,
@@ -915,14 +963,32 @@ class Pipeline:
 
     # ------------------------------------------------------------ site model
     def accept_assessment(self, key):
-        """Operator marks one reported object as normal for this site."""
+        """Operator marks one reported object as normal for this site.
+
+        Routed by which camera found it. An optical contact's box is in
+        OPTICAL pixels and handing it to the thermal site model taught the
+        wrong cells an unrelated lesson - the object stayed reported, the
+        operator clicked again, and somewhere across the frame a patch of
+        thermal baseline quietly learned something false.
+        """
         for a in self.result.assessments:
-            if a.key == key:
+            if a.key != key:
+                continue
+            if a.kind == "optical" and self.optical_site is not None:
+                cells = self.optical_site.accept(a.box)
+                # And in the thermal model too, if there is a mapping - the
+                # same object is in both fields of view and the operator
+                # meant the object, not one camera's opinion of it.
+                if self.H is not None:
+                    cells += self.site.accept(
+                        homography.map_box(np.linalg.inv(self.H), a.box))
+            else:
                 cells = self.site.accept(a.box)
-                if a.kind == "track" and a.track_id in self.dwell.records:
-                    del self.dwell.records[a.track_id]
-                self.alerts.clear(key)
-                return cells
+            if a.kind == "track" and a.track_id in self.dwell.records:
+                del self.dwell.records[a.track_id]
+            self.optical_contacts.seen.pop(key, None)
+            self.alerts.clear(key)
+            return cells
         return 0
 
     def save_site(self, path):
