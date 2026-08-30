@@ -38,8 +38,8 @@ from .classification.rules import classify, not_airborne
 from .detection.thermal import ThermalDetector
 from .drivers.thermal.calibration import calibrate_frame
 from .detection.objects import (
-    AIRCRAFT_NAMES, CAN_OVERRULE, ObjectRecogniser, best_overlap,
-    find_second_model)
+    AIRCRAFT_NAMES, AUTOFETCH, CAN_OVERRULE, DRONE_PATH,
+    ObjectRecogniser, best_overlap, find_second_model)
 from .detection.optical import OpticalDetector
 from .fusion import (OpticalContactLog, assess_optical_only, assess_static,
                      assess_track, associate, verify_optical, verify_thermal)
@@ -225,6 +225,12 @@ class Pipeline:
             if recogniser is None else None
         if second:
             self.recogniser2 = ObjectRecogniser(path=second)
+        elif recogniser is None and AUTOFETCH:
+            # Nothing in the second slot. Go and get the one model that can
+            # say "drone", rather than leaving it as a command to remember.
+            self.recogniser2 = ObjectRecogniser(path=DRONE_PATH,
+                                                autofetch=False)
+            self.recogniser2.fetch_drone_model()
             # Half a cycle out of step, so the two never land on one frame.
             self.recogniser2._tick = self.recogniser2.every_n // 2
         self.optical_contacts = OpticalContactLog()

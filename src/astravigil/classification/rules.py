@@ -114,9 +114,17 @@ MAX_AIRFRAME_AREA_PX = 2000.0
 #   and a compact outline, which a radiator does not have.
 #
 # All three, or the movement test stands.
+# And the "hot core" half of that has to allow for the case the rig is
+# actually looking at: a drone on a desk in front of a warm wall is COLDER
+# than its background, not warmer. Its own peak-above-own-mean is small,
+# because a cold-soaked airframe is uniformly cold - so requiring a hot core
+# rules out exactly the cold-soaked target the rest of this system is built
+# to catch. What it does have is contrast, in whichever direction, against
+# the surface behind it. Either qualifies.
 LANDED_MIN_PARTS = 2
 LANDED_MAX_ASPECT = 2.6
 LANDED_MIN_EXTENT = 0.25
+LANDED_MIN_CONTRAST_C = 3.0
 
 
 def looks_landed(detection):
@@ -130,7 +138,9 @@ def looks_landed(detection):
     aspect = detection.aspect
     if aspect < 1.0:
         aspect = 1.0 / max(aspect, 1e-6)
-    return (detection.hotspot_c >= HOTSPOT_DRONE_C
+    stands_out = (detection.hotspot_c >= HOTSPOT_DRONE_C
+                  or abs(detection.contrast_c) >= LANDED_MIN_CONTRAST_C)
+    return (stands_out
             and detection.parts >= LANDED_MIN_PARTS
             and aspect <= LANDED_MAX_ASPECT
             and detection.extent >= LANDED_MIN_EXTENT)

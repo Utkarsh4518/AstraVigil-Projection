@@ -112,6 +112,14 @@ MODEL_PREFERENCE = ("yolov5s.onnx", "yolov5m.onnx", "yolov5n.onnx")
 MODEL2_PATH = os.environ.get("ASTRAVIGIL_OBJECT_MODEL2", "")
 DRONE_MODEL = "drone.onnx"
 
+# A YOLOv5 trained on drones: 416px input, one class, 28 MB. It is the only
+# model in this system that can produce the word "drone" - COCO cannot, and
+# guesses "bowl", "dog" or "laptop" instead - so it is fetched automatically
+# rather than left as a step to remember.
+DRONE_URL = ("https://huggingface.co/engdarwish/drone-detection-yolov5/"
+             "resolve/main/best.onnx")
+DRONE_PATH = os.path.join(MODEL_DIR, DRONE_MODEL)
+
 # Class names that are direct evidence of an aircraft rather than context.
 # A model trained on drones saying "drone" is worth something; a COCO model
 # cannot produce this word at all, which is the point.
@@ -439,6 +447,55 @@ class ObjectRecogniser:
             self._start_fetch()
 
     # --------------------------------------------------------------- fetch
+    def fetch_drone_model(self):
+        """Fetch the drone model in the background if it is not there.
+
+        Called for the SECOND slot, which is empty on a rig that has only
+        ever fetched COCO. It was a command somebody had to run, and it did
+        not get run - three sessions of a quadcopter being called a bowl, a
+        dog and a laptop, because the only model that can say the word
+        "drone" was one manual step away and nothing on screen said so.
+        A 28 MB download that happens once is not worth a step.
+        """
+        dest = os.path.join(MODEL_DIR, DRONE_MODEL)
+        # This recogniser IS the drone slot, whatever it was pointed at
+        # before. Saying so here rather than at the call site keeps the two
+        # from ever disagreeing about which model this object holds.
+        self.path = dest
+        self.labels = _load_labels(dest)
+        if os.path.exists(dest):
+            self.net, self.error = None, None
+            self._load()
+            return
+        self.net = None
+        self.fetch_pct = 0.0
+
+        def run():
+            def progress(got, total):
+                self.fetch_pct = (100.0 * got / total) if total else None
+            try:
+                download_model(DRONE_URL, dest, progress=progress)
+                with open(os.path.splitext(dest)[0] + ".names", "w",
+                          encoding="utf-8") as fh:
+                    fh.write("drone" + chr(10))
+            except (urllib.error.URLError, OSError) as exc:
+                self.fetch_pct = None
+                self.error = f"could not fetch {DRONE_MODEL} ({exc})"
+                return
+            self.fetch_pct = None
+            self.path = dest
+            self.labels = _load_labels(dest)
+            # Clear the failure from before the file existed, or a model that
+            # loaded perfectly reports the error it had while it was still
+            # downloading.
+            self.error = None
+            self._load()
+            print(f"object naming: fetched {dest} "
+                  f"({'ready' if self.available else self.error})")
+
+        threading.Thread(target=run, daemon=True,
+                         name="astravigil-drone-fetch").start()
+
     def _start_fetch(self):
         dest = os.path.join(MODEL_DIR, DEFAULT_MODEL)
         self.fetch_pct = 0.0
