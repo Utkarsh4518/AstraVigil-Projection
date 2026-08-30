@@ -49,6 +49,7 @@ from .site_intelligence import DwellMonitor, SiteBaseline
 from .site_intelligence.optical_baseline import OpticalBaseline
 from .site_intelligence.baseline import MIN_LEARNED_FRAMES
 from .tracking.tracker import Tracker
+from .utils.env import env_int
 
 
 # How many cross-cue exchanges the trail remembers. Enough to read the recent
@@ -184,7 +185,7 @@ class Result:
 class Pipeline:
     def __init__(self, source, H=None, threshold_c=1.5, site=None,
                  alerts=None, fps=25.0, clock="wall", learn=True,
-                 cross_cue=True, optical_every_n=3, escalator=None,
+                 cross_cue=True, optical_every_n=None, escalator=None,
                  escalate_at=0.75, policy=None, auto_calibrate=True,
                  calibration_path=None, min_area=None, recogniser=None):
         self.source = source
@@ -200,6 +201,14 @@ class Pipeline:
         # more clutter, so this runs at a fraction of the rate. Thermal keeps
         # every frame: it is the primary sensor and it is the cheap one.
         self.cross_cue = cross_cue
+        # Frames between optical passes. Everything optical - the motion
+        # detector, the site baseline, the calibrator's candidate frames -
+        # runs on this tick, so it is the one knob that trades optical
+        # freshness for frame rate without changing what anything decides.
+        # Raise it on a machine that cannot keep up; the thermal path, which
+        # is the primary sensor, is untouched by it.
+        if optical_every_n is None:
+            optical_every_n = env_int("ASTRAVIGIL_OPTICAL_EVERY_N", 3)
         self.optical = OpticalDetector(every_n=optical_every_n)
         # Names for what the optical camera is looking at. Optional and
         # self-disabling: with no weights file this reports nothing and every

@@ -93,6 +93,48 @@ MIN_DISPLACEMENT_PX = 8.0
 # range clears it comfortably, an aircraft at watch range does not come near.
 MAX_AIRFRAME_AREA_PX = 2000.0
 
+# THE LANDED AIRFRAME EXEMPTION.
+#
+# The displacement gate above says a thing that has not moved is not an
+# aircraft, and it is wrong about the one aircraft that matters most: a drone
+# sitting on a surface with its battery and ESCs still warm has not moved
+# either. Measured on the rig - a clear hot signature in the thermal frame,
+# and the classifier answering "unknown" because the object was stationary.
+# The gate added to stop a radiator being called a drone was stopping a drone
+# being called a drone.
+#
+# What separates them is structure. A radiator, a mug or a laptop vent is one
+# warm region. A quadcopter is several - motors, ESCs and a battery - inside
+# one compact rigid outline, and the detector already counts those as parts.
+# So a stationary object is exempt from the movement test when it looks like
+# an airframe rather than like a warm surface:
+#
+#   a hot core well above its own mean, which a warm surface does not have;
+#   two or more distinct hot parts, which a single warm object does not have;
+#   and a compact outline, which a radiator does not have.
+#
+# All three, or the movement test stands.
+LANDED_MIN_PARTS = 2
+LANDED_MAX_ASPECT = 2.6
+LANDED_MIN_EXTENT = 0.25
+
+
+def looks_landed(detection):
+    """Does this stationary warm thing look like an airframe, or like a
+    warm surface?
+
+    See LANDED_MIN_PARTS. The point is to let a drone that has landed
+    keep its name without letting every warm object in a room acquire
+    one.
+    """
+    aspect = detection.aspect
+    if aspect < 1.0:
+        aspect = 1.0 / max(aspect, 1e-6)
+    return (detection.hotspot_c >= HOTSPOT_DRONE_C
+            and detection.parts >= LANDED_MIN_PARTS
+            and aspect <= LANDED_MAX_ASPECT
+            and detection.extent >= LANDED_MIN_EXTENT)
+
 
 def not_airborne(detection, track):
     """Why this cannot be an aircraft, or None if it might be.
@@ -101,8 +143,9 @@ def not_airborne(detection, track):
     front of an operator. "unknown" with no explanation is the same silence
     that made the previous answer untrustworthy.
     """
-    if track is not None and track.hits >= MIN_HITS \
-            and track.displacement_px < MIN_DISPLACEMENT_PX:
+    if (track is not None and track.hits >= MIN_HITS
+            and track.displacement_px < MIN_DISPLACEMENT_PX
+            and not looks_landed(detection)):
         return (f"has not moved - {track.displacement_px:.1f} px of net "
                 f"travel over its whole history")
     if detection.area > MAX_AIRFRAME_AREA_PX:
@@ -127,6 +170,16 @@ def classify(detection, track):
         return "unknown", 0.0
 
     drone = bird = 0.0
+
+    # A landed airframe has no wingbeat to measure and never will, so the
+    # 0.45 the flap test carries has to come from somewhere or a stationary
+    # drone can never clear the decision threshold. Its structure is the
+    # evidence: several hot parts in a compact rigid outline is the thing a
+    # warm surface cannot produce, and it is why the exemption let this
+    # object past the movement gate in the first place.
+    if (track.displacement_px < MIN_DISPLACEMENT_PX
+            and looks_landed(detection)):
+        return "drone", min(0.95, 0.62 + 0.06 * detection.parts)
 
     # --- wingbeat
     flap = track.flap_score
